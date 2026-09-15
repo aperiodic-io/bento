@@ -75,6 +75,7 @@ input:
       client_certs: []
     sasl: [] # No default (optional)
     multi_header: false
+    add_record_metadata: true
     batching:
       count: 0
       byte_size: 0
@@ -769,6 +770,14 @@ Decode headers into lists to allow handling of multiple values with the same key
 
 Type: `bool`  
 Default: `false`  
+
+### `add_record_metadata`
+
+Add the `kafka_*` metadata fields and record headers to each message. Disabling this avoids several allocations per record when no downstream component reads them.
+
+
+Type: `bool`  
+Default: `true`  
 
 ### `batching`
 
