@@ -1,7 +1,11 @@
-FROM golang:1.27.1 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.1 AS build
 
+# Cross-compile natively for the target platform instead of emulating it.
+ARG TARGETOS=linux
+ARG TARGETARCH
 ENV CGO_ENABLED=0
-ENV GOOS=linux
+ENV GOOS=$TARGETOS
+ENV GOARCH=$TARGETARCH
 RUN useradd -u 10001 bento
 
 WORKDIR /go/src/github.com/warpstreamlabs/bento/
