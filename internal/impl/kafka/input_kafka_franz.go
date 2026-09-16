@@ -166,6 +166,7 @@ With this option, you can return topic order and per-topic partition ordering. T
 		Field(service.NewTLSToggledField("tls")).
 		Field(saslField()).
 		Field(service.NewBoolField("multi_header").Description("Decode headers into lists to allow handling of multiple values with the same key").Default(false).Advanced()).
+		Field(service.NewBoolField("add_record_metadata").Description("Add the `kafka_*` metadata fields and record headers to each message. Disabling this avoids several allocations per record when no downstream component reads them.").Default(true).Advanced()).
 		Field(service.NewBatchPolicyField("batching").
 			Description("Allows you to configure a [batching policy](/docs/configuration/batching) that applies to individual topic partitions in order to batch messages together before flushing them for processing. Batching can be beneficial for performance as well as useful for windowed processing, and doing so this way preserves the ordering of topic partitions.").
 			Advanced()).
@@ -227,6 +228,7 @@ type franzKafkaReader struct {
 	commitPeriod    time.Duration
 	regexPattern    bool
 	multiHeader     bool
+	addMetadata     bool
 	batchPolicy     service.BatchPolicy
 
 	reconnectOnUnknownTopic bool
@@ -500,6 +502,9 @@ func newFranzKafkaReaderFromConfig(conf *service.ParsedConfig, res *service.Reso
 	if tlsEnabled {
 		f.tlsConf = tlsConf
 	}
+	if f.addMetadata, err = conf.FieldBool("add_record_metadata"); err != nil {
+		return nil, err
+	}
 	if f.multiHeader, err = conf.FieldBool("multi_header"); err != nil {
 		return nil, err
 	}
@@ -517,6 +522,11 @@ type msgWithRecord struct {
 
 func (f *franzKafkaReader) recordToMessage(record *kgo.Record) *msgWithRecord {
 	msg := service.NewMessage(record.Value)
+	if !f.addMetadata {
+		record.Key = nil
+		record.Value = nil
+		return &msgWithRecord{msg: msg, r: record}
+	}
 	if record.Key != nil {
 		msg.MetaSetMut("kafka_key", string(record.Key))
 	}
