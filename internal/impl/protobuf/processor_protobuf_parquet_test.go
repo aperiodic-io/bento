@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,10 +13,12 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/compress"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
@@ -307,4 +310,350 @@ func BenchmarkProtobufParquetEncode(b *testing.B) {
 		}
 	}
 	b.ReportMetric(float64(n*b.N)/b.Elapsed().Seconds(), "msgs/s")
+}
+
+// ------------------------------------------------------------------------------
+// Wire-format coverage. Every scalar kind the encoder claims to support gets its
+// own decode branch and its own Arrow builder, and several of them reinterpret
+// bits (zigzag, sign-extension, float bit patterns) in ways a happy-path fixture
+// of int64/double/string never touches.
+
+const ppeKindsProto = `syntax = "proto3";
+package bento.test;
+
+enum Venue {
+  VENUE_UNSPECIFIED = 0;
+  VENUE_SPOT = 1;
+  VENUE_PERP = 2;
+}
+
+message Kinds {
+  int32 f_int32 = 1;
+  int64 f_int64 = 2;
+  uint32 f_uint32 = 3;
+  uint64 f_uint64 = 4;
+  sint32 f_sint32 = 5;
+  sint64 f_sint64 = 6;
+  fixed32 f_fixed32 = 7;
+  fixed64 f_fixed64 = 8;
+  sfixed32 f_sfixed32 = 9;
+  sfixed64 f_sfixed64 = 10;
+  float f_float = 11;
+  double f_double = 12;
+  bool f_bool = 13;
+  string f_string = 14;
+  bytes f_bytes = 15;
+  // Field 16 and up need a two-byte tag, which is its own decode path.
+  Venue f_enum = 16;
+  repeated int32 r_int32 = 17;
+  repeated float r_float = 18;
+  repeated string r_string = 19;
+  map<string, int64> m_counts = 20;
+}
+`
+
+func ppeKindsDir(t testing.TB) string {
+	t.Helper()
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "kinds.proto"), []byte(ppeKindsProto), 0o644))
+	return dir
+}
+
+func ppeKindsType(t testing.TB, dir string) protoreflect.MessageType {
+	t.Helper()
+	files, _, err := loadDescriptors(service.MockResources().FS(), []string{dir})
+	require.NoError(t, err)
+	d, err := files.FindDescriptorByName("bento.test.Kinds")
+	require.NoError(t, err)
+	return dynamicpb.NewMessageType(d.(protoreflect.MessageDescriptor))
+}
+
+func ppeKindsProc(t testing.TB, dir string) *protobufParquetEncoder {
+	t.Helper()
+	conf, err := protobufParquetEncodeSpec().ParseYAML(fmt.Sprintf(`
+message: bento.test.Kinds
+import_paths: [ %v ]
+columns:
+  - { name: f_int32 }
+  - { name: f_int64 }
+  - { name: f_uint32 }
+  - { name: f_uint64 }
+  - { name: f_sint32 }
+  - { name: f_sint64 }
+  - { name: f_fixed32 }
+  - { name: f_fixed64 }
+  - { name: f_sfixed32 }
+  - { name: f_sfixed64 }
+  - { name: f_float }
+  - { name: f_double }
+  - { name: f_bool }
+  - { name: f_string }
+  - { name: f_bytes }
+  - { name: f_enum }
+  - { name: r_int32 }
+  - { name: r_float }
+`, dir), nil)
+	require.NoError(t, err)
+	p, err := newProtobufParquetEncoder(conf, service.MockResources())
+	require.NoError(t, err)
+	return p
+}
+
+// Extremes on purpose: the min/max of each width is where a missing
+// sign-extension or a stray uint64->int64 conversion shows up.
+func TestProtobufParquetEncodeEveryScalarKind(t *testing.T) {
+	dir := ppeKindsDir(t)
+	mt := ppeKindsType(t, dir)
+
+	m := mt.New()
+	fields := m.Descriptor().Fields()
+	set := func(name string, v protoreflect.Value) { m.Set(fields.ByName(protoreflect.Name(name)), v) }
+	set("f_int32", protoreflect.ValueOfInt32(math.MinInt32))
+	set("f_int64", protoreflect.ValueOfInt64(math.MinInt64))
+	set("f_uint32", protoreflect.ValueOfUint32(math.MaxUint32))
+	set("f_uint64", protoreflect.ValueOfUint64(math.MaxUint64))
+	set("f_sint32", protoreflect.ValueOfInt32(math.MinInt32))
+	set("f_sint64", protoreflect.ValueOfInt64(math.MinInt64))
+	set("f_fixed32", protoreflect.ValueOfUint32(math.MaxUint32))
+	set("f_fixed64", protoreflect.ValueOfUint64(math.MaxUint64))
+	set("f_sfixed32", protoreflect.ValueOfInt32(math.MinInt32))
+	set("f_sfixed64", protoreflect.ValueOfInt64(math.MinInt64))
+	set("f_float", protoreflect.ValueOfFloat32(-1.5))
+	set("f_double", protoreflect.ValueOfFloat64(-math.MaxFloat64))
+	set("f_bool", protoreflect.ValueOfBool(true))
+	set("f_string", protoreflect.ValueOfString("héllo"))
+	set("f_bytes", protoreflect.ValueOfBytes([]byte{0x00, 0x01, 0xff}))
+	set("f_enum", protoreflect.ValueOfEnum(2))
+	ints := m.Mutable(fields.ByName("r_int32")).List()
+	for _, v := range []int32{1, -2, math.MaxInt32} {
+		ints.Append(protoreflect.ValueOfInt32(v))
+	}
+	floats := m.Mutable(fields.ByName("r_float")).List()
+	for _, v := range []float32{1.5, -2.5} {
+		floats.Append(protoreflect.ValueOfFloat32(v))
+	}
+	raw, err := proto.Marshal(m.Interface())
+	require.NoError(t, err)
+
+	out, err := ppeKindsProc(t, dir).ProcessBatch(context.Background(), service.MessageBatch{service.NewMessage(raw)})
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	require.Len(t, out[0], 1)
+	data, err := out[0][0].AsBytes()
+	require.NoError(t, err)
+	tbl := ppeReadTable(t, data)
+	require.EqualValues(t, 1, tbl.NumRows())
+
+	assert.Equal(t, int32(math.MinInt32), ppeCol(t, tbl, "f_int32").(*array.Int32).Value(0))
+	assert.Equal(t, int64(math.MinInt64), ppeCol(t, tbl, "f_int64").(*array.Int64).Value(0))
+	assert.Equal(t, uint32(math.MaxUint32), ppeCol(t, tbl, "f_uint32").(*array.Uint32).Value(0))
+	assert.Equal(t, uint64(math.MaxUint64), ppeCol(t, tbl, "f_uint64").(*array.Uint64).Value(0))
+	assert.Equal(t, int32(math.MinInt32), ppeCol(t, tbl, "f_sint32").(*array.Int32).Value(0), "sint32 must be zigzag-decoded")
+	assert.Equal(t, int64(math.MinInt64), ppeCol(t, tbl, "f_sint64").(*array.Int64).Value(0), "sint64 must be zigzag-decoded")
+	assert.Equal(t, uint32(math.MaxUint32), ppeCol(t, tbl, "f_fixed32").(*array.Uint32).Value(0))
+	assert.Equal(t, uint64(math.MaxUint64), ppeCol(t, tbl, "f_fixed64").(*array.Uint64).Value(0))
+	assert.Equal(t, int32(math.MinInt32), ppeCol(t, tbl, "f_sfixed32").(*array.Int32).Value(0), "sfixed32 keeps its sign")
+	assert.Equal(t, int64(math.MinInt64), ppeCol(t, tbl, "f_sfixed64").(*array.Int64).Value(0), "sfixed64 keeps its sign")
+	assert.Equal(t, float32(-1.5), ppeCol(t, tbl, "f_float").(*array.Float32).Value(0))
+	assert.Equal(t, -math.MaxFloat64, ppeCol(t, tbl, "f_double").(*array.Float64).Value(0))
+	assert.True(t, ppeCol(t, tbl, "f_bool").(*array.Boolean).Value(0))
+	assert.Equal(t, "héllo", ppeCol(t, tbl, "f_string").(*array.String).Value(0))
+	assert.Equal(t, []byte{0x00, 0x01, 0xff}, ppeCol(t, tbl, "f_bytes").(*array.Binary).Value(0))
+	assert.Equal(t, int32(2), ppeCol(t, tbl, "f_enum").(*array.Int32).Value(0), "an enum lands as its number")
+
+	rInts := ppeCol(t, tbl, "r_int32").(*array.List)
+	start, end := rInts.ValueOffsets(0)
+	var gotInts []int32
+	for i := start; i < end; i++ {
+		gotInts = append(gotInts, rInts.ListValues().(*array.Int32).Value(int(i)))
+	}
+	assert.Equal(t, []int32{1, -2, math.MaxInt32}, gotInts)
+
+	rFloats := ppeCol(t, tbl, "r_float").(*array.List)
+	start, end = rFloats.ValueOffsets(0)
+	var gotFloats []float32
+	for i := start; i < end; i++ {
+		gotFloats = append(gotFloats, rFloats.ListValues().(*array.Float32).Value(int(i)))
+	}
+	assert.Equal(t, []float32{1.5, -2.5}, gotFloats)
+}
+
+// proto3 packs repeated scalars, but nothing requires a producer to: proto2
+// encoders, hand-rolled writers and some language runtimes emit one tag per
+// element, and a decoder that only understands the packed form silently returns
+// an empty list for them.
+func TestProtobufParquetEncodeUnpackedRepeatedFields(t *testing.T) {
+	dir := ppeKindsDir(t)
+
+	var raw []byte
+	for _, v := range []int32{7, -8, 9} {
+		raw = protowire.AppendTag(raw, 17, protowire.VarintType)
+		raw = protowire.AppendVarint(raw, uint64(uint32(v)))
+	}
+	for _, v := range []float32{0.5, -0.25} {
+		raw = protowire.AppendTag(raw, 18, protowire.Fixed32Type)
+		raw = protowire.AppendFixed32(raw, math.Float32bits(v))
+	}
+
+	out, err := ppeKindsProc(t, dir).ProcessBatch(context.Background(), service.MessageBatch{service.NewMessage(raw)})
+	require.NoError(t, err)
+	data, err := out[0][0].AsBytes()
+	require.NoError(t, err)
+	tbl := ppeReadTable(t, data)
+
+	ints := ppeCol(t, tbl, "r_int32").(*array.List)
+	start, end := ints.ValueOffsets(0)
+	var gotInts []int32
+	for i := start; i < end; i++ {
+		gotInts = append(gotInts, ints.ListValues().(*array.Int32).Value(int(i)))
+	}
+	assert.Equal(t, []int32{7, -8, 9}, gotInts, "unpacked varint elements must all be kept")
+
+	floats := ppeCol(t, tbl, "r_float").(*array.List)
+	start, end = floats.ValueOffsets(0)
+	var gotFloats []float32
+	for i := start; i < end; i++ {
+		gotFloats = append(gotFloats, floats.ListValues().(*array.Float32).Value(int(i)))
+	}
+	assert.Equal(t, []float32{0.5, -0.25}, gotFloats, "unpacked fixed32 elements must all be kept")
+}
+
+// A record written by a newer producer carries fields this config never mapped.
+// Skipping them has to consume exactly the right number of bytes for each wire
+// type, or every field after the unknown one decodes as garbage.
+func TestProtobufParquetEncodeSkipsUnknownFields(t *testing.T) {
+	dir := ppeKindsDir(t)
+
+	var raw []byte
+	raw = protowire.AppendTag(raw, 900, protowire.VarintType)
+	raw = protowire.AppendVarint(raw, math.MaxUint64)
+	raw = protowire.AppendTag(raw, 901, protowire.Fixed64Type)
+	raw = protowire.AppendFixed64(raw, 0xdeadbeefcafef00d)
+	raw = protowire.AppendTag(raw, 902, protowire.Fixed32Type)
+	raw = protowire.AppendFixed32(raw, 0xfeedface)
+	raw = protowire.AppendTag(raw, 903, protowire.BytesType)
+	raw = protowire.AppendBytes(raw, []byte("an unmapped string"))
+	// Only now the field the config actually asks for.
+	raw = protowire.AppendTag(raw, 2, protowire.VarintType)
+	raw = protowire.AppendVarint(raw, 4242)
+
+	out, err := ppeKindsProc(t, dir).ProcessBatch(context.Background(), service.MessageBatch{service.NewMessage(raw)})
+	require.NoError(t, err)
+	data, err := out[0][0].AsBytes()
+	require.NoError(t, err)
+	tbl := ppeReadTable(t, data)
+	require.EqualValues(t, 1, tbl.NumRows())
+	assert.Equal(t, int64(4242), ppeCol(t, tbl, "f_int64").(*array.Int64).Value(0),
+		"the mapped field after four unknown ones must still decode")
+}
+
+// A field repeated on the wire for a singular column is legal protobuf and means
+// "last one wins" -- merge semantics, not an error.
+func TestProtobufParquetEncodeLastValueWinsForSingularFields(t *testing.T) {
+	dir := ppeKindsDir(t)
+
+	var raw []byte
+	for _, v := range []uint64{1, 2, 3} {
+		raw = protowire.AppendTag(raw, 2, protowire.VarintType)
+		raw = protowire.AppendVarint(raw, v)
+	}
+
+	out, err := ppeKindsProc(t, dir).ProcessBatch(context.Background(), service.MessageBatch{service.NewMessage(raw)})
+	require.NoError(t, err)
+	data, err := out[0][0].AsBytes()
+	require.NoError(t, err)
+	tbl := ppeReadTable(t, data)
+	assert.Equal(t, int64(3), ppeCol(t, tbl, "f_int64").(*array.Int64).Value(0))
+}
+
+// The four supported units have to divide the same instant to the same day, or a
+// pipeline configured in ms silently files its rows under the wrong date.
+func TestProtobufParquetEncodePartitionUnits(t *testing.T) {
+	dir := ppeTestDir(t)
+	mt := ppeTickType(t, dir)
+	instant := time.Date(2026, 9, 15, 13, 45, 30, 500_000_000, time.UTC)
+
+	for unit, ts := range map[string]int64{
+		"s":  instant.Unix(),
+		"ms": instant.UnixMilli(),
+		"us": instant.UnixMicro(),
+		"ns": instant.UnixNano(),
+	} {
+		t.Run(unit, func(t *testing.T) {
+			p := ppeNewProc(t, dir, fmt.Sprintf(`
+partition:
+  field: local_timestamp_us
+  unit: %v
+  layout: year=2006/month=01/day=02
+`, unit))
+			out, err := p.ProcessBatch(context.Background(), service.MessageBatch{
+				service.NewMessage(ppeMarshal(t, mt, ppeTick{symbol: "X", localTs: ts})),
+			})
+			require.NoError(t, err)
+			require.Len(t, out[0], 1)
+			key, ok := out[0][0].MetaGetMut("partition")
+			require.True(t, ok)
+			assert.Equal(t, "year=2026/month=09/day=15", key)
+		})
+	}
+}
+
+// The codec is not observable from the decoded rows -- a file written with the
+// wrong one reads back identically -- so it has to be asserted against the
+// Parquet metadata, which is also what a downstream reader negotiates on.
+func TestProtobufParquetEncodeCompressionOptions(t *testing.T) {
+	dir := ppeTestDir(t)
+	mt := ppeTickType(t, dir)
+
+	for _, tc := range []struct {
+		name  string
+		extra string
+		want  compress.Compression
+	}{
+		{name: "default is zstd", want: compress.Codecs.Zstd},
+		{name: "snappy", extra: "compression: snappy", want: compress.Codecs.Snappy},
+		{name: "uncompressed", extra: "compression: uncompressed", want: compress.Codecs.Uncompressed},
+		{name: "gzip with a level", extra: "compression: gzip\ncompression_level: 1", want: compress.Codecs.Gzip},
+		{name: "zstd without dictionary encoding", extra: "dictionary: false", want: compress.Codecs.Zstd},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := ppeNewProc(t, dir, tc.extra)
+			out, err := p.ProcessBatch(context.Background(), service.MessageBatch{
+				service.NewMessage(ppeMarshal(t, mt, ppeTick{symbol: "X", price: 1.25})),
+			})
+			require.NoError(t, err)
+			data, err := out[0][0].AsBytes()
+			require.NoError(t, err)
+
+			rdr, err := file.NewParquetReader(bytes.NewReader(data))
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = rdr.Close() })
+			chunk, err := rdr.MetaData().RowGroup(0).ColumnChunk(0)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, chunk.Compression())
+
+			// Whatever the codec, the rows still have to survive it.
+			assert.Equal(t, "X", ppeCol(t, ppeReadTable(t, data), "symbol").(*array.String).Value(0))
+		})
+	}
+}
+
+// These two are rejected at construction rather than mishandled at runtime, and
+// the repeated-string guard is load-bearing: a repeated string arrives as one
+// length-delimited chunk per element, which the packed-scalar path would happily
+// misread as a run of varints.
+func TestProtobufParquetEncodeRejectsUnsupportedFieldShapes(t *testing.T) {
+	dir := ppeKindsDir(t)
+	for name, column := range map[string]string{
+		"repeated string": "r_string",
+		"map":             "m_counts",
+	} {
+		t.Run(name, func(t *testing.T) {
+			conf, err := protobufParquetEncodeSpec().ParseYAML(fmt.Sprintf(
+				"message: bento.test.Kinds\nimport_paths: [ %v ]\ncolumns: [ { name: %v } ]", dir, column), nil)
+			require.NoError(t, err)
+			_, err = newProtobufParquetEncoder(conf, service.MockResources())
+			require.Error(t, err)
+		})
+	}
 }
