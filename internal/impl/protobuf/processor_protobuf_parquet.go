@@ -127,7 +127,8 @@ type protobufParquetEncoder struct {
 	mInvalid    *service.MetricCounter
 	columns     []ppeColumn
 	slots       []ppeSlot
-	slotByField []int // indexed by protobuf field number, -1 when not decoded
+	slotByField []int                            // indexed by protobuf field number, -1 when not decoded
+	slotOfField map[protoreflect.FieldNumber]int // used instead when field numbers are sparse
 	schema      *arrow.Schema
 	props       *parquet.WriterProperties
 	skipInvalid bool
@@ -237,7 +238,14 @@ func newProtobufParquetEncoder(conf *service.ParsedConfig, mgr *service.Resource
 		if err != nil {
 			return nil, err
 		}
-		e.partitionDivisor = map[string]int64{"s": 1, "ms": 1e3, "us": 1e6, "ns": 1e9}[unit]
+		// The enum on the field is a lint rule, not a parse-time constraint, so an
+		// unknown unit arrives here intact whenever linting is skipped. Left
+		// unchecked it becomes divisor 0 and panics on the first message.
+		divisor, ok := map[string]int64{"s": 1, "ms": 1e3, "us": 1e6, "ns": 1e9}[unit]
+		if !ok {
+			return nil, fmt.Errorf("partition: unknown unit '%v'", unit)
+		}
+		e.partitionDivisor = divisor
 		if e.partitionLayout, err = pc.FieldString(ppeFieldPartitionLayout); err != nil {
 			return nil, err
 		}
@@ -250,12 +258,20 @@ func newProtobufParquetEncoder(conf *service.ParsedConfig, mgr *service.Resource
 	for f := range slotOfField {
 		maxField = max(maxField, f)
 	}
-	e.slotByField = make([]int, maxField+1)
-	for i := range e.slotByField {
-		e.slotByField[i] = -1
-	}
-	for f, s := range slotOfField {
-		e.slotByField[f] = s
+	// Indexed by field number, so it is only worth building while the highest
+	// number stays close to the number of fields. Protobuf allows numbers up to
+	// 536,870,911, and a schema that puts one column up there would otherwise
+	// allocate gigabytes here.
+	if maxField <= ppeMaxDenseFieldNumber {
+		e.slotByField = make([]int, maxField+1)
+		for i := range e.slotByField {
+			e.slotByField[i] = -1
+		}
+		for f, s := range slotOfField {
+			e.slotByField[f] = s
+		}
+	} else {
+		e.slotOfField = slotOfField
 	}
 
 	codecName, err := conf.FieldString(ppeFieldCompression)
@@ -273,10 +289,15 @@ func newProtobufParquetEncoder(conf *service.ParsedConfig, mgr *service.Resource
 	if e.skipInvalid, err = conf.FieldBool(ppeFieldSkipInvalid); err != nil {
 		return nil, err
 	}
-	codec := map[string]compress.Compression{
+	// Unchecked, an unknown codec resolves to the zero value -- which is
+	// Uncompressed -- and silently writes uncompressed files forever.
+	codec, ok := map[string]compress.Compression{
 		"zstd": compress.Codecs.Zstd, "snappy": compress.Codecs.Snappy, "gzip": compress.Codecs.Gzip,
 		"lz4raw": compress.Codecs.Lz4Raw, "uncompressed": compress.Codecs.Uncompressed,
 	}[codecName]
+	if !ok {
+		return nil, fmt.Errorf("unknown compression '%v'", codecName)
+	}
 	propOpts := []parquet.WriterProperty{
 		parquet.WithCompression(codec),
 		parquet.WithDictionaryDefault(false),
@@ -297,6 +318,10 @@ func newProtobufParquetEncoder(conf *service.ParsedConfig, mgr *service.Resource
 	e.props = parquet.NewWriterProperties(propOpts...)
 	return e, nil
 }
+
+// Past this, a slot table indexed by field number costs more than the map lookup
+// it saves: 4096 entries is 32KB, a schema numbered beyond it is not dense.
+const ppeMaxDenseFieldNumber = protoreflect.FieldNumber(4096)
 
 func ppeIsInteger(k protoreflect.Kind) bool {
 	switch k {
@@ -371,7 +396,11 @@ func (e *protobufParquetEncoder) decode(b []byte, r *ppeRow) error {
 		}
 		b = b[n:]
 		slot := -1
-		if int(num) < len(e.slotByField) {
+		if e.slotOfField != nil {
+			if mapped, ok := e.slotOfField[num]; ok {
+				slot = mapped
+			}
+		} else if int(num) < len(e.slotByField) {
 			slot = e.slotByField[num]
 		}
 		if slot < 0 {
@@ -487,16 +516,6 @@ func (e *protobufParquetEncoder) newGroup(first *service.Message, key string, me
 	return g
 }
 
-func ppeScalar(kind protoreflect.Kind, v uint64) any {
-	switch kind {
-	case protoreflect.Sint64Kind:
-		return protowire.DecodeZigZag(v)
-	case protoreflect.Sint32Kind:
-		return int32(protowire.DecodeZigZag(v & math.MaxUint32))
-	}
-	return nil
-}
-
 // ppeAppender binds the builder type once, so the per-row hot path does not
 // type switch.
 func ppeAppender(bld array.Builder, slot int, s ppeSlot) func(r *ppeRow) {
@@ -523,7 +542,9 @@ func ppeAppender(bld array.Builder, slot int, s ppeSlot) func(r *ppeRow) {
 	case *array.Int32Builder:
 		switch s.kind {
 		case protoreflect.Sint32Kind:
-			return func(r *ppeRow) { b.Append(ppeScalar(s.kind, r.bits[slot]).(int32)) }
+			// Inlined rather than routed through ppeSignedInt: this runs per row,
+			// and the boxing the shared helper used to do allocated on every one.
+			return func(r *ppeRow) { b.Append(int32(protowire.DecodeZigZag(r.bits[slot] & math.MaxUint32))) }
 		case protoreflect.Sfixed32Kind:
 			return func(r *ppeRow) { b.Append(int32(uint32(r.bits[slot]))) }
 		default:
@@ -547,11 +568,24 @@ func ppeAppender(bld array.Builder, slot int, s ppeSlot) func(r *ppeRow) {
 	panic(fmt.Sprintf("unsupported builder %T", bld))
 }
 
-func (e *protobufParquetEncoder) partitionKey(r *ppeRow, s *ppeSlot, lastSec *int64, lastKey *string) string {
-	v := int64(r.bits[e.partitionSlot])
-	if s.kind == protoreflect.Sint64Kind || s.kind == protoreflect.Sint32Kind {
-		v = protowire.DecodeZigZag(r.bits[e.partitionSlot])
+// ppeSignedInt is the one place raw slot bits become a signed integer, shared by
+// the partition key and the Int32/Int64 appenders so the directory a row lands in
+// can never contradict the row's own timestamp column.
+func ppeSignedInt(kind protoreflect.Kind, bits uint64) int64 {
+	switch kind {
+	case protoreflect.Sint64Kind:
+		return protowire.DecodeZigZag(bits)
+	case protoreflect.Sint32Kind:
+		return int64(int32(protowire.DecodeZigZag(bits & math.MaxUint32)))
+	case protoreflect.Sfixed32Kind:
+		// Fixed32 is stored zero-extended; the signed form is the low 32 bits.
+		return int64(int32(uint32(bits)))
 	}
+	return int64(bits)
+}
+
+func (e *protobufParquetEncoder) partitionKey(r *ppeRow, s *ppeSlot, lastSec *int64, lastKey *string) string {
+	v := ppeSignedInt(s.kind, r.bits[e.partitionSlot])
 	sec := v / e.partitionDivisor
 	if v < 0 && v%e.partitionDivisor != 0 {
 		sec--
@@ -576,6 +610,7 @@ func (e *protobufParquetEncoder) ProcessBatch(ctx context.Context, batch service
 	lastSec, lastKey := int64(0), ""
 	invalid := 0
 
+	processed := 0
 	for _, msg := range batch {
 		raw, err := msg.AsBytes()
 		if err == nil {
@@ -594,7 +629,10 @@ func (e *protobufParquetEncoder) ProcessBatch(ctx context.Context, batch service
 		}
 		if current == nil || current.key != key {
 			if current = byKey[key]; current == nil {
-				current = e.newGroup(msg, key, mem, len(batch))
+				// Only the rows still to come can land in a group created now;
+				// hinting the whole batch for every key multiplies peak memory by
+				// the number of partitions a batch straddles.
+				current = e.newGroup(msg, key, mem, len(batch)-processed)
 				byKey[key] = current
 				groups = append(groups, current)
 			}
@@ -603,6 +641,7 @@ func (e *protobufParquetEncoder) ProcessBatch(ctx context.Context, batch service
 			appendCol(row)
 		}
 		current.rows++
+		processed++
 	}
 	if invalid > 0 {
 		e.mInvalid.Incr(int64(invalid))

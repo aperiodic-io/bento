@@ -657,3 +657,169 @@ func TestProtobufParquetEncodeRejectsUnsupportedFieldShapes(t *testing.T) {
 		})
 	}
 }
+
+// NewStringEnumField only attaches a lint rule, so an out-of-enum value reaches
+// the constructor intact whenever linting is skipped (the streams API, --chilled,
+// a programmatic ParseYAML). Both of these used to be unchecked map lookups that
+// returned the zero value: the unit became divisor 0 and panicked with an integer
+// divide by zero on the first message, and the codec became "uncompressed" and
+// silently dropped compression on every file written.
+func TestProtobufParquetEncodeRejectsOutOfEnumOptions(t *testing.T) {
+	dir := ppeTestDir(t)
+	for name, extra := range map[string]string{
+		"unknown partition unit": "partition: { field: local_timestamp_us, unit: seconds, layout: '2006' }",
+		"unknown compression":    "compression: zippy",
+	} {
+		t.Run(name, func(t *testing.T) {
+			conf, err := protobufParquetEncodeSpec().ParseYAML(fmt.Sprintf(
+				"message: bento.test.Tick\nimport_paths: [ %v ]\ncolumns: [ { name: symbol } ]\n%v", dir, extra), nil)
+			require.NoError(t, err)
+			_, err = newProtobufParquetEncoder(conf, service.MockResources())
+			require.Error(t, err)
+		})
+	}
+}
+
+// The partition key and the column value are derived from the same bits by two
+// different code paths, and they have to agree: a row whose own timestamp column
+// says 1969 must not be filed under 2106. sfixed32 is where they diverged --
+// the column appender reinterpreted the low 32 bits as signed, the partition key
+// did not.
+func TestProtobufParquetEncodePartitionKeyMatchesColumnForSignedKinds(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "signed.proto"), []byte(`syntax = "proto3";
+package bento.test;
+message Signed {
+  sfixed32 ts_sfixed32 = 1;
+  sint64 ts_sint64 = 2;
+  sint32 ts_sint32 = 3;
+  int32 ts_int32 = 4;
+}
+`), 0o644))
+	files, _, err := loadDescriptors(service.MockResources().FS(), []string{dir})
+	require.NoError(t, err)
+	d, err := files.FindDescriptorByName("bento.test.Signed")
+	require.NoError(t, err)
+	mt := dynamicpb.NewMessageType(d.(protoreflect.MessageDescriptor))
+
+	// One day before the epoch: every signed kind must land on 1969-12-31.
+	const beforeEpoch = int64(-86400)
+	for _, field := range []string{"ts_sfixed32", "ts_sint64", "ts_sint32", "ts_int32"} {
+		t.Run(field, func(t *testing.T) {
+			m := mt.New()
+			fd := m.Descriptor().Fields().ByName(protoreflect.Name(field))
+			if fd.Kind() == protoreflect.Sint64Kind {
+				m.Set(fd, protoreflect.ValueOfInt64(beforeEpoch))
+			} else {
+				m.Set(fd, protoreflect.ValueOfInt32(int32(beforeEpoch)))
+			}
+			raw, err := proto.Marshal(m.Interface())
+			require.NoError(t, err)
+
+			conf, err := protobufParquetEncodeSpec().ParseYAML(fmt.Sprintf(`
+message: bento.test.Signed
+import_paths: [ %v ]
+columns: [ { name: ts, field: %v } ]
+partition: { field: %v, unit: s, layout: 'year=2006/month=01/day=02' }
+`, dir, field, field), nil)
+			require.NoError(t, err)
+			p, err := newProtobufParquetEncoder(conf, service.MockResources())
+			require.NoError(t, err)
+
+			out, err := p.ProcessBatch(context.Background(), service.MessageBatch{service.NewMessage(raw)})
+			require.NoError(t, err)
+			require.Len(t, out[0], 1)
+			key, ok := out[0][0].MetaGetMut("partition")
+			require.True(t, ok)
+			assert.Equal(t, "year=1969/month=12/day=31", key, "partition key disagrees with the row's own timestamp")
+
+			data, err := out[0][0].AsBytes()
+			require.NoError(t, err)
+			tbl := ppeReadTable(t, data)
+			col := ppeCol(t, tbl, "ts")
+			var got int64
+			switch c := col.(type) {
+			case *array.Int64:
+				got = c.Value(0)
+			case *array.Int32:
+				got = int64(c.Value(0))
+			default:
+				t.Fatalf("unexpected column type %T", col)
+			}
+			assert.Equal(t, beforeEpoch, got)
+		})
+	}
+}
+
+// A length-delimited payload arriving on a packable repeated field is the packed
+// encoding -- the wire format offers no way to tell it apart from a string sent
+// on the same field number. This pins that the decoder agrees with the protobuf
+// runtime rather than inventing a stricter rule of its own.
+func TestProtobufParquetEncodePackedDecodeMatchesProtoUnmarshal(t *testing.T) {
+	dir := ppeKindsDir(t)
+	mt := ppeKindsType(t, dir)
+
+	var raw []byte
+	raw = protowire.AppendTag(raw, 17, protowire.BytesType)
+	raw = protowire.AppendBytes(raw, []byte("BTCUSDT"))
+
+	reference := mt.New().Interface()
+	require.NoError(t, proto.Unmarshal(raw, reference))
+	refList := reference.ProtoReflect().Get(mt.Descriptor().Fields().ByName("r_int32")).List()
+	var want []int32
+	for i := 0; i < refList.Len(); i++ {
+		want = append(want, int32(refList.Get(i).Int()))
+	}
+	require.NotEmpty(t, want, "the protobuf runtime itself reads these bytes as packed varints")
+
+	out, err := ppeKindsProc(t, dir).ProcessBatch(context.Background(), service.MessageBatch{service.NewMessage(raw)})
+	require.NoError(t, err)
+	data, err := out[0][0].AsBytes()
+	require.NoError(t, err)
+	tbl := ppeReadTable(t, data)
+	list := ppeCol(t, tbl, "r_int32").(*array.List)
+	start, end := list.ValueOffsets(0)
+	var got []int32
+	for i := start; i < end; i++ {
+		got = append(got, list.ListValues().(*array.Int32).Value(int(i)))
+	}
+	assert.Equal(t, want, got)
+}
+
+// Field numbers go up to 536,870,911, and a slot table indexed by field number
+// allocates one entry per number up to the highest one used -- 8MB for a single
+// column on field 1,000,000, and gigabytes near the top of the range.
+func TestProtobufParquetEncodeHandlesSparseFieldNumbers(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "sparse.proto"), []byte(`syntax = "proto3";
+package bento.test;
+message Sparse {
+  string symbol = 1;
+  int64 ts = 536870911;
+}
+`), 0o644))
+	conf, err := protobufParquetEncodeSpec().ParseYAML(fmt.Sprintf(`
+message: bento.test.Sparse
+import_paths: [ %v ]
+columns: [ { name: symbol }, { name: ts } ]
+`, dir), nil)
+	require.NoError(t, err)
+
+	p, err := newProtobufParquetEncoder(conf, service.MockResources())
+	require.NoError(t, err)
+	assert.Nil(t, p.slotByField, "a schema numbered this high must not build a dense slot table")
+
+	var raw []byte
+	raw = protowire.AppendTag(raw, 1, protowire.BytesType)
+	raw = protowire.AppendBytes(raw, []byte("BTC-USDT"))
+	raw = protowire.AppendTag(raw, 536870911, protowire.VarintType)
+	raw = protowire.AppendVarint(raw, 1234)
+
+	out, err := p.ProcessBatch(context.Background(), service.MessageBatch{service.NewMessage(raw)})
+	require.NoError(t, err)
+	data, err := out[0][0].AsBytes()
+	require.NoError(t, err)
+	tbl := ppeReadTable(t, data)
+	assert.Equal(t, "BTC-USDT", ppeCol(t, tbl, "symbol").(*array.String).Value(0))
+	assert.Equal(t, int64(1234), ppeCol(t, tbl, "ts").(*array.Int64).Value(0))
+}
