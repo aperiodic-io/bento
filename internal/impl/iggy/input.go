@@ -13,6 +13,7 @@ import (
 	"github.com/Jeffail/checkpoint"
 	"github.com/Jeffail/shutdown"
 	iggcon "github.com/apache/iggy/foreign/go/contracts"
+	ierror "github.com/apache/iggy/foreign/go/errors"
 
 	"github.com/warpstreamlabs/bento/public/service"
 )
@@ -58,7 +59,7 @@ Joins `+"`consumer_group`"+` (creating it when it does not exist) and consumes t
 
 ### Delivery and commits
 
-Each poll of one partition becomes one message batch. Batches from the same partition may be in flight concurrently and acknowledged out of order: the input stores, every `+"`commit_period`"+`, the highest offset below which every message of the partition has been acknowledged. A rejected (nacked) batch is retried downstream until it succeeds, and no offset at or beyond it is stored meanwhile. Acknowledged offsets are also stored on shutdown, after which the input leaves the group. When a rebalance moves a partition to another member, the server no longer accepts offsets for it from this one, so what was acknowledged within the last `+"`commit_period`"+` is delivered again by the new owner.
+Each poll of one partition becomes one message batch. Batches from the same partition may be in flight concurrently and acknowledged out of order: the input stores, every `+"`commit_period`"+`, the highest offset below which every message of the partition has been acknowledged. A rejected (nacked) batch is retried downstream until it succeeds, and no offset at or beyond it is stored meanwhile. Acknowledged offsets are also stored on shutdown, after which the input leaves the group. When a rebalance moves a partition to another member, what was acknowledged is stored as part of the handoff; messages still in flight at that point are delivered again by the new owner.
 
 `+"`checkpoint_limit`"+` bounds the messages of one partition that may be in flight (delivered but not yet acknowledged); the partition is not polled while it is at the limit. It must exceed what the output holds before acknowledging (for example a full output batch plus the next one filling up), or consumption stalls.
 
@@ -344,8 +345,8 @@ type iggyReader struct {
 	// inFlight counts delivered batches whose ack has not arrived yet.
 	inFlight  int
 	ackSignal chan struct{}
-	// rejoin asks the poll loop to rejoin the group. A store is where a lost
-	// membership shows first: the server accepts polls from non-members.
+	// rejoin asks the poll loop to rejoin the group after a store was refused
+	// for a lost membership.
 	rejoin atomic.Bool
 
 	shutSig *shutdown.Signaller
@@ -650,7 +651,8 @@ func (r *iggyReader) assignedPartitions(ctx context.Context, cl iggyClient) ([]u
 }
 
 // syncAssignment fetches the partitions to consume and reconciles the delivery
-// state with them: revoked partitions are dropped, new ones are initialised from the stored offset or start_from.
+// state with them: revoked partitions store their acknowledged offset and are
+// dropped, new ones are initialised from the stored offset or start_from.
 func (r *iggyReader) syncAssignment(ctx context.Context, cl iggyClient) ([]uint32, error) {
 	parts, err := r.assignedPartitions(ctx, cl)
 	if err != nil {
@@ -672,10 +674,15 @@ func (r *iggyReader) syncAssignment(ctx context.Context, cl iggyClient) ([]uint3
 	}
 	r.mu.Unlock()
 
-	// The server refuses to store an offset for a partition this member no
-	// longer owns, so what was acknowledged but not yet stored is redelivered
-	// by the new owner. Acks that arrive later for it are ignored.
+	// A revoked partition stays committable by this member until its
+	// cooperative handoff completes (the commit completes it, or the server's
+	// consumer_group.rebalancing_timeout), so what was acknowledged is stored
+	// now. Acks that arrive after the drop are ignored: the new owner
+	// redelivers those messages.
 	for _, st := range revoked {
+		cctx, cancel := reqCtx(ctx)
+		r.commitPartition(cctx, cl, st)
+		cancel()
 		r.mu.Lock()
 		delete(r.parts, st.id)
 		r.mu.Unlock()
@@ -767,6 +774,12 @@ func (r *iggyReader) pollPartition(ctx context.Context, cl iggyClient, id uint32
 	cancel()
 	if err != nil {
 		return 0, err
+	}
+	if polled.PartitionId == iggcon.ResyncRequiredPartition && len(polled.Messages) == 0 {
+		// The server fences a poll by a non-owner with an empty batch on this
+		// sentinel rather than an error: the assignment is stale, or the
+		// membership was lost to a reconnect.
+		return 0, ierror.ErrConsumerGroupPartitionNotOwned
 	}
 	msgs := polled.Messages
 	if !fromFirst {
@@ -874,8 +887,8 @@ func (r *iggyReader) commitPartition(ctx context.Context, cl iggyClient, st *par
 	id := st.id
 	if err := cl.StoreConsumerOffset(ctx, r.consumer, r.streamID, r.topicID, offset, &id); err != nil {
 		if !r.conf.exclusive && isMembershipError(err) {
-			// The SDK moves to a partition's primary under a new client
-			// identity, which is no longer a member of the group.
+			// Every SDK reconnect, including the one after a cancelled
+			// request, registers a new client identity that is not a member.
 			r.rejoin.Store(true)
 		}
 		if ctx.Err() == nil {

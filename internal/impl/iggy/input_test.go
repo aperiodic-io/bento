@@ -40,8 +40,9 @@ type fakeClient struct {
 	// neverMember makes every sync report a lost membership, even right
 	// after a successful join.
 	neverMember bool
-	// lenientPolls accepts group polls from non-members, as Iggy 0.9.0 does.
-	lenientPolls bool
+	// pendingRevoked are partitions moved away from this member whose
+	// handoff has not completed: the server still accepts their offsets.
+	pendingRevoked []uint32
 }
 
 type storeCall struct {
@@ -182,7 +183,8 @@ func (f *fakeClient) GetConsumerOffset(_ context.Context, _ iggcon.Consumer, _, 
 func (f *fakeClient) StoreConsumerOffset(_ context.Context, c iggcon.Consumer, _, _ iggcon.Identifier, offset uint64, p *uint32) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if c.Kind == iggcon.ConsumerKindGroup && (!f.member || !slices.Contains(f.assignment(), *p)) {
+	if c.Kind == iggcon.ConsumerKindGroup &&
+		(!f.member || (!slices.Contains(f.assignment(), *p) && !slices.Contains(f.pendingRevoked, *p))) {
 		return ierror.ErrConsumerGroupPartitionNotOwned
 	}
 	if len(f.storeErrs) > 0 {
@@ -207,13 +209,10 @@ func (f *fakeClient) PollMessages(_ context.Context, _, _ iggcon.Identifier, c i
 		f.pollErrs = f.pollErrs[1:]
 		return nil, err
 	}
-	if c.Kind == iggcon.ConsumerKindGroup && !f.lenientPolls {
-		if !f.member {
-			return nil, ierror.ErrConsumerGroupMemberNotFound
-		}
-		if !slices.Contains(f.assignment(), *p) {
-			return nil, ierror.ErrConsumerGroupPartitionNotOwned
-		}
+	if c.Kind == iggcon.ConsumerKindGroup && (!f.member || !slices.Contains(f.assignment(), *p)) {
+		// Like the server: a fenced poll is not an error but an empty batch
+		// on the re-sync sentinel partition.
+		return &iggcon.PolledMessage{PartitionId: iggcon.ResyncRequiredPartition}, nil
 	}
 	msgs := f.parts[*p]
 	var start uint64
@@ -547,12 +546,11 @@ func TestIggyInputReconnectsAfterRepeatedFailures(t *testing.T) {
 	require.Eventually(t, func() bool { o, _ := first.storedOffset(0); return o == 9 }, time.Second, 5*time.Millisecond)
 }
 
-// The server accepts polls from non-members, so a membership lost to the SDK
-// moving to another node surfaces only as refused stores. Those must trigger
-// a rejoin, or no offset would ever be stored again.
+// A membership lost to an SDK reconnect (any cancelled request resets the
+// connection under a new identity) surfaces as refused stores and fenced
+// polls. Either must lead to a rejoin, or no offset would be stored again.
 func TestIggyInputRejoinsWhenStoresAreRefused(t *testing.T) {
 	fc := newFakeClient(1)
-	fc.lenientPolls = true
 	fc.produce(t, 0, 5)
 	conf := testConfig()
 	r, _ := newTestReader(t, conf, fc)
@@ -572,7 +570,6 @@ func TestIggyInputRejoinsWhenStoresAreRefused(t *testing.T) {
 // acknowledged offsets.
 func TestIggyInputCloseRejoinsForFinalCommit(t *testing.T) {
 	fc := newFakeClient(1)
-	fc.lenientPolls = true
 	fc.produce(t, 0, 5)
 	conf := testConfig()
 	conf.commitPeriod = time.Hour
@@ -719,15 +716,16 @@ func TestIggyInputMultiplePartitions(t *testing.T) {
 	}, time.Second, 5*time.Millisecond)
 }
 
-// When a rebalance moves a partition away, the input stops polling it and
-// never stores an offset for it again (the server would refuse, and a late
-// store could move the new owner's position), while the partitions it keeps
-// carry on.
-func TestIggyInputRevokedPartitionStopsAndIsNotCommitted(t *testing.T) {
+// When a rebalance moves a partition away, the input stores what was
+// acknowledged at once (the server accepts it while the cooperative handoff is
+// pending), stops polling it, and ignores acks that arrive after the drop.
+func TestIggyInputRevokedPartitionCommitsHandoffThenStops(t *testing.T) {
 	fc := newFakeClient(2)
 	fc.produce(t, 0, 10)
 	fc.produce(t, 1, 5)
-	r, _ := newTestReader(t, testConfig(), fc)
+	conf := testConfig()
+	conf.commitPeriod = time.Hour // only the revocation can store partition 0
+	r, _ := newTestReader(t, conf, fc)
 	require.NoError(t, r.Connect(context.Background()))
 
 	var p0Acks []service.AckFunc
@@ -739,32 +737,30 @@ func TestIggyInputRevokedPartitionStopsAndIsNotCommitted(t *testing.T) {
 			ackOK(t, ack)
 		}
 	}
-	fc.set(func(f *fakeClient) { f.assign = []uint32{1} })
+	ackOK(t, p0Acks[0])
+	fc.set(func(f *fakeClient) {
+		f.assign = []uint32{1}
+		f.pendingRevoked = []uint32{0}
+	})
 	require.Eventually(t, func() bool {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		_, ok := r.parts[0]
 		return !ok
 	}, 10*time.Second, 10*time.Millisecond, "partition 0 was not dropped")
+	o, ok := fc.storedOffset(0)
+	require.True(t, ok, "the acknowledged offset was not stored on revocation")
+	assert.Equal(t, uint64(4), o)
 
-	for _, ack := range p0Acks {
-		ackOK(t, ack)
-	}
+	ackOK(t, p0Acks[1])
 	fc.produce(t, 1, 5)
 	b, ack := readBatch(t, r)
 	p, _ := b[0].MetaGet("iggy_partition_id")
 	assert.Equal(t, "1", p)
-	assert.Equal(t, seq(5, 9), offsets(t, b))
 	ackOK(t, ack)
-	require.Eventually(t, func() bool { o, _ := fc.storedOffset(1); return o == 9 }, time.Second, 5*time.Millisecond)
-
-	_, stored := fc.storedOffset(0)
-	assert.False(t, stored, "stored an offset for a revoked partition")
-	fc.mu.Lock()
-	defer fc.mu.Unlock()
-	for _, s := range fc.stores {
-		assert.NotEqual(t, uint32(0), s.partition)
-	}
+	settle()
+	o, _ = fc.storedOffset(0)
+	assert.Equal(t, uint64(4), o, "stored a late ack of a revoked partition")
 }
 
 // Exclusive mode consumes every partition as a single named consumer and
