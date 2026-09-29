@@ -38,9 +38,7 @@ output:
 
 cache_resources:
   - label: foo
-    memcached:
-      addresses:
-        - localhost:11211
+    memory:
       default_ttl: 60s
 `+"```"+`
 

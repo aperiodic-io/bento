@@ -24,19 +24,17 @@ output:
   fallback: []
 ```
 
-This pattern is useful for triggering events in the case where certain output targets have broken. For example, if you had an output type `http_client` but wished to reroute messages whenever the endpoint becomes unreachable you could use this pattern:
+This pattern is useful for triggering events in the case where certain output targets have broken. For example, if you had an output type `aws_s3` but wished to reroute messages whenever the bucket becomes unreachable you could use this pattern:
 
 ```yaml
 output:
   fallback:
-    - http_client:
-        url: http://foo:4195/post/might/become/unreachable
-        retries: 3
-        retry_period: 1s
-    - http_client:
-        url: http://bar:4196/somewhere/else
-        retries: 3
-        retry_period: 1s
+    - aws_s3:
+        bucket: foo
+        path: ${! uuid_v4() }.txt
+    - aws_s3:
+        bucket: bar
+        path: ${! uuid_v4() }.txt
       processors:
         - mapping: 'root = "failed to send this message to foo: " + content()'
     - file:
@@ -54,11 +52,9 @@ When an output within a fallback sequence uses batching, like so:
 ```yaml
 output:
   fallback:
-    - aws_dynamodb:
-        table: foo
-        string_columns:
-          id: ${!json("id")}
-          content: ${!content()}
+    - aws_s3:
+        bucket: foo
+        path: ${!json("id")}.json
         batching:
           count: 10
           period: 1s

@@ -34,9 +34,6 @@ input:
     paths: [ ./data/* ]
     scanner:
       switch:
-        - re_match_name: '\.avro$'
-          scanner: { avro: {} }
-
         - re_match_name: '\.csv$'
           scanner: { csv: {} }
 

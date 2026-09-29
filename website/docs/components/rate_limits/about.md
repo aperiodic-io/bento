@@ -13,25 +13,28 @@ rate_limit_resources:
       interval: 1s
 ```
 
-And most components that hit external services have a field `rate_limit` for specifying a rate limit resource to use, identified by the `label` field. For example, if we wanted to use our `foobar` rate limit with an [`http_client`][input.http_client] input it would look like this:
+And most components that hit external services have a field `rate_limit` for specifying a rate limit resource to use, identified by the `label` field. For example, if we wanted to use our `foobar` rate limit with a [`kafka_franz`][input.kafka_franz] input it would look like this:
 
 ```yaml
 input:
-  http_client:
-    url: TODO
-    verb: GET
+  kafka_franz:
+    seed_brokers: [ TODO ]
+    topics: [ foo ]
+    consumer_group: foogroup
     rate_limit: foobar
 ```
 
-By using a rate limit in this way we can guarantee that our input will only poll our HTTP source at the rate of 500 requests per second.
+By using a rate limit in this way we can guarantee that our input will only poll our Kafka brokers at the rate of 500 requests per second.
 
-Some components don't have a `rate_limit` field but we might still wish to throttle them by a rate limit, in which case we can use the [`rate_limit` processor][processor.rate_limit] that applies back pressure to a processing pipeline when the limit is reached. For example, if we wished to limit the consumption of lines of a [`csv` file input][input.csv] to a specified rate limit we can do that with the following:
+Some components don't have a `rate_limit` field but we might still wish to throttle them by a rate limit, in which case we can use the [`rate_limit` processor][processor.rate_limit] that applies back pressure to a processing pipeline when the limit is reached. For example, if we wished to limit the consumption of lines of a CSV file read by a [`file` input][input.file] to a specified rate limit we can do that with the following:
 
 ```yaml
 input:
-  csv:
+  file:
     paths:
       - ./foo.csv
+    scanner:
+      csv: {}
   processors:
     - rate_limit:
         resource: foobar
@@ -44,6 +47,6 @@ import ComponentSelect from '@theme/ComponentSelect';
 <ComponentSelect type="rate_limits" singular="rate limit"></ComponentSelect>
 
 [processor.rate_limit]: /docs/components/processors/rate_limit
-[input.csv]: /docs/components/inputs/csv
-[input.http_client]: /docs/components/inputs/http_client
+[input.file]: /docs/components/inputs/file
+[input.kafka_franz]: /docs/components/inputs/kafka_franz
 [config.resources]: /docs/configuration/resources

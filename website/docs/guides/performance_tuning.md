@@ -20,9 +20,10 @@ Next, if your source supports multiple parallel consumers then you can try doing
 
 ```yaml
 input:
-  http_client:
-    url: http://localhost:4195/get
-    verb: GET
+  kafka_franz:
+    seed_brokers: [ localhost:9092 ]
+    topics: [ foo ]
+    consumer_group: bento_group
 ```
 
 You could change to:
@@ -32,9 +33,10 @@ input:
   broker:
     copies: 4
     inputs:
-      - http_client:
-          url: http://localhost:4195/get
-          verb: GET
+      - kafka_franz:
+          seed_brokers: [ localhost:9092 ]
+          topics: [ foo ]
+          consumer_group: bento_group
 ```
 
 Which would create the exact same consumer as before with four connections in total. Try increasing the number of copies to see how that affects the throughput. If your multiple consumers would require different configurations then set copies to `1` and write each consumer as a separate object in the `inputs` array.

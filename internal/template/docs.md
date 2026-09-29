@@ -37,22 +37,23 @@ import TabItem from '@theme/TabItem';
 <TabItem value="template">
 
 ```yml
-name: aws_sqs_list
+name: kafka_franz_list
 type: input
 
 fields:
-  - name: urls
+  - name: seed_brokers
     type: string
     kind: list
-  - name: region
+  - name: topic
     type: string
-    default: us-east-1
+    default: events
 
 mapping: |
-  root.broker.inputs = this.urls.map_each(url -> {
-    "aws_sqs": {
-      "url": url,
-      "region": this.region,
+  root.broker.inputs = this.seed_brokers.map_each(addr -> {
+    "kafka_franz": {
+      "seed_brokers": [ addr ],
+      "topics": [ this.topic ],
+      "consumer_group": "bento",
     }
   })
 ```
@@ -62,10 +63,10 @@ mapping: |
 
 ```yml
 input:
-  aws_sqs_list:
-    urls:
-      - https://sqs.us-east-2.amazonaws.com/123456789012/MyQueue1
-      - https://sqs.us-east-2.amazonaws.com/123456789012/MyQueue2
+  kafka_franz_list:
+    seed_brokers:
+      - kafka-a:9092
+      - kafka-b:9092
 
 pipeline:
   processors:
@@ -82,12 +83,14 @@ pipeline:
 input:
   broker:
     inputs:
-      - aws_sqs:
-          url: https://sqs.us-east-2.amazonaws.com/123456789012/MyQueue1
-          region: us-east-1
-      - aws_sqs:
-          url: https://sqs.us-east-2.amazonaws.com/123456789012/MyQueue2
-          region: us-east-1
+      - kafka_franz:
+          seed_brokers: [ kafka-a:9092 ]
+          topics: [ events ]
+          consumer_group: bento
+      - kafka_franz:
+          seed_brokers: [ kafka-b:9092 ]
+          topics: [ events ]
+          consumer_group: bento
 
 pipeline:
   processors:

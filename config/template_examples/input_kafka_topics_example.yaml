@@ -1,0 +1,38 @@
+name: kafka_franz_topics
+type: input
+
+fields:
+  - name: topics
+    type: string
+    kind: list
+  - name: seed_brokers
+    type: string
+    kind: list
+    default: [ localhost:9092 ]
+
+mapping: |
+  root.broker.inputs = this.topics.map_each(topic -> {
+    "kafka_franz": {
+      "seed_brokers": this.seed_brokers,
+      "topics": [ topic ],
+      "consumer_group": topic,
+    }
+  })
+
+tests:
+  - name: topics array
+    config:
+      topics:
+        - foo
+        - bar
+    expected:
+      broker:
+        inputs:
+          - kafka_franz:
+              seed_brokers: [ localhost:9092 ]
+              topics: [ foo ]
+              consumer_group: foo
+          - kafka_franz:
+              seed_brokers: [ localhost:9092 ]
+              topics: [ bar ]
+              consumer_group: bar

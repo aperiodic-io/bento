@@ -16,6 +16,7 @@ import (
 	"github.com/warpstreamlabs/bento/public/service"
 
 	_ "github.com/warpstreamlabs/bento/internal/impl/io"
+	_ "github.com/warpstreamlabs/bento/internal/impl/pure"
 )
 
 func TestFunctionExamples(t *testing.T) {

@@ -7,13 +7,12 @@ An input is a source of data piped through an array of optional [processors][pro
 
 ```yaml
 input:
-  label: my_redis_input
+  label: my_kafka_input
 
-  redis_streams:
-    url: tcp://localhost:6379
-    streams:
+  kafka_franz:
+    seed_brokers: [ localhost:9092 ]
+    topics:
       - bento_stream
-    body_key: body
     consumer_group: bento_group
 
   # Optional list of processing steps
@@ -23,7 +22,7 @@ input:
        root.link_count = this.links.length()
 ```
 
-Some inputs have a logical end, for example a [`csv` input][input.csv] ends once the last row is consumed, when this happens the input gracefully terminates and Bento will shut itself down once all messages have been processed fully.
+Some inputs have a logical end, for example a [`file` input][input.file] ends once the last file is consumed, when this happens the input gracefully terminates and Bento will shut itself down once all messages have been processed fully.
 
 It's also possible to specify a logical end for an input that otherwise doesn't have one with the [`read_until` input][input.read_until], which checks a condition against each consumed message in order to determine whether it should be the last.
 
@@ -35,17 +34,13 @@ Only one input is configured at the root of a Bento config. However, the root in
 input:
   broker:
     inputs:
-      - kafka:
-          addresses: [ TODO ]
+      - kafka_franz:
+          seed_brokers: [ TODO ]
           topics: [ foo, bar ]
           consumer_group: foogroup
 
-      - redis_streams:
-          url: tcp://localhost:6379
-          streams:
-            - bento_stream
-          body_key: body
-          consumer_group: bento_group
+      - file:
+          paths: [ ./data/*.jsonl ]
 ```
 
 ## Labels
@@ -73,7 +68,7 @@ import ComponentSelect from '@theme/ComponentSelect';
 [processors]: /docs/components/processors/about
 [input.broker]: /docs/components/inputs/broker
 [input.generate]: /docs/components/inputs/generate
-[input.csv]: /docs/components/inputs/csv
+[input.file]: /docs/components/inputs/file
 [input.sequence]: /docs/components/inputs/sequence
 [input.read_until]: /docs/components/inputs/read_until
 [metrics.about]: /docs/components/metrics/about

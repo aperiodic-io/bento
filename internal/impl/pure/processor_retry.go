@@ -55,9 +55,9 @@ If you wish to wrap a batch-aware series of processors then take a look at the [
 
 When messages are batched the child processors of a `+"retry"+` are executed for each individual message in isolation, performed serially by default but in parallel when the field `+"[`parallel`](#parallel) is set to `true`"+`. This is an intentional limitation of the retry processor and is done in order to ensure that errors are correctly associated with a given input message. Otherwise, the archiving, expansion, grouping, filtering and so on of the child processors could obfuscate this relationship.
 
-If the target behaviour of your retried processors is "batch aware", in that you wish to perform some processing across the entire batch of messages and repeat it in the event of errors, you can use an `+"[`archive` processor](/docs/components/processors/archive)"+` to collapse the batch into an individual message. Then, within these child processors either perform your batch aware processing on the archive, or use an `+"[`unarchive` processor](/docs/components/processors/unarchive)"+` in order to expand the single message back out into a batch.
+If the target behaviour of your retried processors is "batch aware", in that you wish to perform some processing across the entire batch of messages and repeat it in the event of errors, you can use an `+"[`archive` processor](/docs/components/processors/archive)"+` to collapse the batch into an individual message. Then, within these child processors perform your batch aware processing on the archive.
 
-For example, if the retry processor were being used to wrap an HTTP request where the payload data is a batch archived into a JSON array it should look something like this:
+For example, if the retry processor were being used to wrap a cache write where the payload data is a batch archived into a JSON array it should look something like this:
 
 `+"```yaml"+`
 pipeline:
@@ -66,40 +66,13 @@ pipeline:
         format: json_array
     - retry:
         processors:
-          - http:
-              url: example.com/nope
-              verb: POST
-    - unarchive:
-        format: json_array
+          - cache:
+              resource: foo
+              operator: set
+              key: ${! json("0.id") }
+              value: ${! content() }
 `+"```"+`
 `).
-		Example("Stop ignoring me Taz", `
-Here we have a config where I generate animal noises and send them to Taz via HTTP. Taz has a tendency to stop his servers whenever I dispatch my animals upon him, and therefore these HTTP requests sometimes fail. However, I have the retry processor and with this super power I can specify a back off policy and it will ensure that for each animal noise the HTTP processor is attempted until either it succeeds or my Bento instance is stopped.
-
-I even go as far as to zero-out the maximum elapsed time field, which means that for each animal noise I will wait indefinitely, because I really really want Taz to receive every single animal noise that he is entitled to.`,
-			`
-input:
-  generate:
-    interval: 1s
-    mapping: 'root.noise = [ "woof", "meow", "moo", "quack" ].index(random_int(min: 0, max: 3))'
-
-pipeline:
-  processors:
-    - retry:
-        backoff:
-          initial_interval: 100ms
-          max_interval: 5s
-          max_elapsed_time: 0s
-        processors:
-          - http:
-              url: 'http://example.com/try/not/to/dox/taz'
-              verb: POST
-
-output:
-  # Drop everything because it's junk data, I don't want it lol
-  drop: {}
-`,
-		).
 		Fields(
 			service.NewBackOffField(rpFieldBackoff, true, nil),
 			service.NewProcessorListField(rpFieldProcessors).

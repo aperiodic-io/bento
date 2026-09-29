@@ -20,11 +20,29 @@ import (
 	"github.com/warpstreamlabs/bento/internal/manager/mock"
 	"github.com/warpstreamlabs/bento/internal/stream"
 
-	_ "github.com/warpstreamlabs/bento/public/components/amqp1"
+	"github.com/warpstreamlabs/bento/public/service"
+
 	_ "github.com/warpstreamlabs/bento/public/components/io"
 	_ "github.com/warpstreamlabs/bento/public/components/pure"
-	_ "github.com/warpstreamlabs/bento/public/components/sql"
 )
+
+// No component this build ships is deprecated, nor has a deprecated field: the
+// lint warnings for them are checked against these.
+func init() {
+	if err := service.RegisterInput("lint_test_input", service.NewConfigSpec().
+		Field(service.NewStringField("url").Deprecated().Optional()),
+		func(*service.ParsedConfig, *service.Resources) (service.Input, error) {
+			return nil, nil
+		}); err != nil {
+		panic(err)
+	}
+	if err := service.RegisterOutput("lint_test_output", service.NewConfigSpec().Deprecated(),
+		func(*service.ParsedConfig, *service.Resources) (service.Output, int, error) {
+			return nil, 0, nil
+		}); err != nil {
+		panic(err)
+	}
+}
 
 func testConfToAny(t testing.TB, conf any) any {
 	var node yaml.Node
@@ -259,20 +277,15 @@ output:
 	require.NoError(t, os.WriteFile(resourceOnePath, []byte(`
 input_resources:
   - label: foo
-    amqp_1:
+    lint_test_input:
       url: amqp://guest:guest@localhost:5672/
-      source_address: foo
 `), 0o644))
 
 	resourceTwoPath := filepath.Join(dir, "res2.yaml")
 	require.NoError(t, os.WriteFile(resourceTwoPath, []byte(`
 output_resources:
   - label: bar
-    sql:
-      driver: postgres
-      data_source_name: postgresql://user:password@postgres:5432/db?sslmode=disable
-      query: INSERT INTO table (foo, bar, baz) VALUES (?, ?, ?);
-      args_mapping: root = [ "neo", "cypher", "trinity" ]
+    lint_test_output: {}
 `), 0o644))
 
 	rdr := config.NewReader(fullPath, []string{resourceOnePath, resourceTwoPath}, config.OptSetLintConfigWarnDeprecated())
@@ -281,7 +294,7 @@ output_resources:
 	require.NoError(t, err)
 	require.Len(t, lintWarns, 2)
 	assert.Contains(t, lintWarns[0], "field url is deprecated")
-	assert.Contains(t, lintWarns[1], "component sql is deprecated")
+	assert.Contains(t, lintWarns[1], "component lint_test_output is deprecated")
 	require.Empty(t, lints)
 }
 

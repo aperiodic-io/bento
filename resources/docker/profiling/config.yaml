@@ -10,22 +10,10 @@ input:
       root.bar = [] # [ "foo", "bar" ]
 
 output:
-  sql_insert:
-    driver: clickhouse
-    dsn: clickhouse://localhost:9000/
-    table: foo
-    columns: [ id, bar ]
-    args_mapping: '[
-        this.id,
-        this.bar,
-    ]'
+  drop: {}
 
 metrics:
   prometheus:
     push_interval: 1s
     push_job_name: bento_push
     push_url: "http://localhost:9091"
-
-# tracer:
-#   jaeger:
-#     agent_address: 'localhost:6831'

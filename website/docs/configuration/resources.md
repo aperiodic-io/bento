@@ -46,7 +46,7 @@ output_resources:
 
 Sometimes it's necessary to use a rather large component multiple times. Instead of copy/pasting the configuration or using YAML anchors you can define your component as a resource.
 
-In the following example we want to make an HTTP request with our payloads. Occasionally the payload might get rejected due to garbage within its contents, and so we catch these rejected requests, attempt to "cleanse" the contents and try to make the same HTTP request again. Since the HTTP request component is quite large (and likely to change over time) we make sure to avoid duplicating it by defining it as a resource `get_foo`:
+In the following example we want to look up a value from a cache using the contents of our payloads as the key. Occasionally the lookup might fail due to garbage within the contents, and so we catch these failed lookups, attempt to "cleanse" the contents and try the same lookup again. Since the lookup component is likely to change over time we make sure to avoid duplicating it by defining it as a resource `get_foo`:
 
 ```yaml
 pipeline:
@@ -60,12 +60,10 @@ pipeline:
 
 processor_resources:
   - label: get_foo
-    http:
-      url: http://example.com/foo
-      verb: POST
-      headers:
-        SomeThing: "set-to-this"
-        SomeThingElse: "set-to-something-else"
+    cache:
+      resource: foo_cache
+      operator: get
+      key: '${! json("content") }'
 ```
 
 ## Feature Toggling
@@ -81,19 +79,16 @@ pipeline:
 
 processor_resources:
   - label: get_foo
-    http:
-      url: http://example.com/foo
-      verb: POST
-      headers:
-        SomeThing: "set-to-this"
-        SomeThingElse: "set-to-something-else"
+    cache:
+      resource: foo_cache
+      operator: get
+      key: '${! json("content") }'
 
   - label: get_bar
-    http:
-      url: http://example.com/bar
-      verb: PUT
-      headers:
-        Desires: "are-empty"
+    cache:
+      resource: bar_cache
+      operator: get
+      key: '${! json("id") }'
 ```
 
 Then when you execute Bento use the environment variable to choose your resource: `FEATURE_REQUEST=get_foo bento -c ./your_config.yaml`.
@@ -113,12 +108,10 @@ And then two resource files, one stored at the path `./staging/request.yaml`:
 ```yaml
 processor_resources:
   - label: get_foo
-    http:
-      url: http://example.com/foo
-      verb: POST
-      headers:
-        SomeThing: "set-to-this"
-        SomeThingElse: "set-to-something-else"
+    cache:
+      resource: staging_cache
+      operator: get
+      key: '${! json("content") }'
 ```
 
 And another stored at the path `./production/request.yaml`:
@@ -126,11 +119,10 @@ And another stored at the path `./production/request.yaml`:
 ```yaml
 processor_resources:
   - label: get_foo
-    http:
-      url: http://example.com/bar
-      verb: PUT
-      headers:
-        Desires: "are-empty"
+    cache:
+      resource: production_cache
+      operator: get
+      key: '${! json("content") }'
 ```
 
 We can select our chosen resource by changing which file we import, either running:

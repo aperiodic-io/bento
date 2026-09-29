@@ -3,13 +3,13 @@ title: Metrics
 sidebar_label: About
 ---
 
-Bento emits lots of metrics in order to expose how components configured within your pipeline are behaving. You can configure exactly where these metrics end up with the config field `metrics`, which describes a metrics format and destination. For example, if you wished to push them via the StatsD protocol you could use this configuration:
+Bento emits lots of metrics in order to expose how components configured within your pipeline are behaving. You can configure exactly where these metrics end up with the config field `metrics`, which describes a metrics format and destination. For example, if you wished to push them to a Prometheus Push Gateway you could use this configuration:
 
 ```yaml
 metrics:
-  statsd:
-    address: localhost:8125
-    flush_period: 100ms
+  prometheus:
+    push_url: http://localhost:9091
+    push_interval: 10s
 ```
 
 The default metrics configuration is to expose Prometheus metrics on the [service-wide HTTP endpoint][http.about] at the endpoints `/metrics` and `/stats`.
@@ -109,7 +109,7 @@ The following Bento configuration:
 ```yaml
 input:
   label: foo
-  http_server: {}
+  stdin: {}
 
 pipeline:
   processors:
@@ -129,9 +129,11 @@ metrics:
 Would produce the following metrics series:
 
 ```text
+input_connection_failed{label="foo",path="root.input"}
+input_connection_lost{label="foo",path="root.input"}
+input_connection_up{label="foo",path="root.input"}
 input_latency_ns{label="foo",path="root.input"}
-input_received{endpoint="post",label="foo",path="root.input"}
-input_received{endpoint="websocket",label="foo",path="root.input"}
+input_received{label="foo",path="root.input"}
 
 processor_batch_received{label="",path="root.pipeline.processors.0"}
 processor_batch_sent{label="",path="root.pipeline.processors.0"}

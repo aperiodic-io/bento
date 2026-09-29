@@ -3,7 +3,7 @@ title: Scanners
 sidebar_label: About
 ---
 
-For most Bento [inputs][input.about] the data consumed comes pre-partitioned into discrete messages which can be comfortably held and processed in memory. However, some inputs such as the [`file` input][input.file] often need to consume data that is large enough that it cannot be processed entirely within memory, and others such as the [`socket` input][input.socket] don't have a concept of consuming the data "entirely".
+For most Bento [inputs][input.about] the data consumed comes pre-partitioned into discrete messages which can be comfortably held and processed in memory. However, some inputs such as the [`file` input][input.file] often need to consume data that is large enough that it cannot be processed entirely within memory.
 
 For such inputs it's necessary to define a mechanism by which the stream of source bytes can be chopped into smaller logical messages, processed and outputted as a continuous process whilst the stream is being read, as this dramatically reduces the memory usage of Bento as a whole and results in a more fluid flow of data.
 
@@ -52,5 +52,4 @@ import ComponentSelect from '@theme/ComponentSelect';
 
 [input.about]: /docs/components/inputs/about
 [input.file]: /docs/components/inputs/file
-[input.socket]: /docs/components/inputs/socket
 [scanner.lines]: /docs/components/scanners/lines

@@ -281,27 +281,6 @@ root.c = range(0, -this.max, -2)
 # Out: {"a":[0,1,2,3,4,5,6,7,8,9],"b":[0,2,4,6,8],"c":[0,-2,-4,-6,-8]}
 ```
 
-### `snowflake_id`
-
-Generate a new snowflake ID each time it is invoked and prints a string representation. I.e.: 1559229974454472704
-
-#### Parameters
-
-**`node_id`** &lt;integer, default `1`&gt; It is possible to specify the node_id.  
-
-#### Examples
-
-
-```coffee
-root.id = snowflake_id()
-```
-
-It is possible to specify the node_id.
-
-```coffee
-root.id = snowflake_id(2)
-```
-
 ### `throw`
 
 Throws an error similar to a regular mapping error. This is useful for abandoning a mapping entirely given certain conditions.
@@ -326,39 +305,6 @@ root.doc.contents = (this.body.content | this.thing.body)
 
 # In:  {"nothing":"matches"}
 # Out: Error("failed assignment (line 1): unknown type")
-```
-
-### `ulid`
-
-:::caution EXPERIMENTAL
-This function is experimental and therefore breaking changes could be made to it outside of major version releases.
-:::
-Generate a random ULID.
-
-#### Parameters
-
-**`encoding`** &lt;string, default `"crockford"`&gt; The format to encode a ULID into. Valid options are: crockford, hex  
-**`random_source`** &lt;string, default `"secure_random"`&gt; The source of randomness to use for generating ULIDs. "secure_random" is recommended for most use cases. "fast_random" can be used if security is not a concern.  
-
-#### Examples
-
-
-Using the defaults of Crockford Base32 encoding and secure random source
-
-```coffee
-root.id = ulid()
-```
-
-ULIDs can be hex-encoded too.
-
-```coffee
-root.id = ulid("hex")
-```
-
-They can be generated using a fast, but unsafe, random source for use cases that are not security-sensitive.
-
-```coffee
-root.id = ulid("crockford", "fast_random")
 ```
 
 ### `uuid_v4`
@@ -778,46 +724,6 @@ Returns the current unix timestamp in nanoseconds.
 
 ```coffee
 root.received_at = timestamp_unix_nano()
-```
-
-## Fake Data Generation
-
-### `fake`
-
-:::caution BETA
-This function is mostly stable but breaking changes could still be made outside of major version releases if a fundamental problem with it is found.
-:::
-Takes in a string that maps to a [faker](https://github.com/go-faker/faker) function and returns the result from that faker function. Returns an error if the given string doesn't match a supported faker function. Supported functions: `latitude`, `longitude`, `unix_time`, `date`, `time_string`, `month_name`, `year_string`, `day_of_week`, `day_of_month`, `timestamp`, `century`, `timezone`, `time_period`, `email`, `mac_address`, `domain_name`, `url`, `username`, `ipv4`, `ipv6`, `password`, `jwt`, `word`, `sentence`, `paragraph`, `cc_type`, `cc_number`, `currency`, `amount_with_currency`, `title_male`, `title_female`, `first_name`, `first_name_male`, `first_name_female`, `last_name`, `name`, `gender`, `chinese_first_name`, `chinese_last_name`, `chinese_name`, `phone_number`, `toll_free_phone_number`, `e164_phone_number`, `uuid_hyphenated`, `uuid_digit`. Refer to the [faker](https://github.com/go-faker/faker) docs for details on these functions.
-
-#### Parameters
-
-**`function`** &lt;string, default `""`&gt; The name of the function to use to generate the value.  
-
-#### Examples
-
-
-Use `time_string` to generate a time in the format `00:00:00`:
-
-```coffee
-root.time = fake("time_string")
-```
-
-Use `email` to generate a string in email address format:
-
-```coffee
-root.email = fake("email")
-```
-
-Use `jwt` to generate a JWT token:
-
-```coffee
-root.jwt = fake("jwt")
-```
-
-Use `uuid_hyphenated` to generate a hypenated UUID:
-
-```coffee
-root.uuid = fake("uuid_hyphenated")
 ```
 
 ## Deprecated

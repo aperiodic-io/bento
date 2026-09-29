@@ -11,6 +11,8 @@
 [Discord](https://console.warpstream.com/socials/discord)
 [Slack](https://console.warpstream.com/socials/slack)
 
+> **This fork (aperiodic-io/bento) carries only the components [live-ingestion](https://github.com/aperiodic-io/live-ingestion) runs**, its raw and metrics archivers: the `kafka_franz` input; the `aws_s3` output; the `protobuf_parquet_encode` and `json_parquet_encode` processors; the `prometheus` metrics exporter; and Bento's dependency-free core (`pure`: `broker`, `switch`, `reject_errored`, `mapping` and the like; `io`: `stdin`, `stdout` and `file`). Every other connector, and its dependencies, was removed. The upstream description below lists connectors this build does not have; see `bento list` for what it does.
+
 Bento is a high performance and resilient stream processor, able to connect various [sources][inputs] and [sinks][outputs] in a range of brokering patterns and perform [hydration, enrichments, transformations and filters][processors] on payloads.
 
 It comes with a [powerful mapping language][bloblang-about], is easy to deploy and monitor, and ready to drop into your pipeline either as a static binary, docker image, or [serverless function][serverless], making it cloud native as heck.

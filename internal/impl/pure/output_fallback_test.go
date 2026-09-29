@@ -38,10 +38,7 @@ func TestFallbackOutputBasic(t *testing.T) {
 
 	conf := parseYAMLOutputConf(t, `
 fallback:
-  - http_client:
-      url: http://localhost:11111111/badurl
-      retries: 1
-      retry_period: "1ms"
+  - reject: fail
     processors:
       - mapping: 'root = "this-should-never-appear %%v".format(count("fallbacktofoo")) + content()'
   - file:

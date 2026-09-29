@@ -82,7 +82,7 @@ Default: `""`
 
 <TabItem value="Counter">
 
-In this example we emit a counter metric called `Foos`, which increments for every message processed, and we label the metric with some metadata about where the message came from and a field from the document that states what type it is. We also configure our metrics to emit to CloudWatch, and explicitly only allow our custom metric and some internal Bento metrics to emit.
+In this example we emit a counter metric called `Foos`, which increments for every message processed, and we label the metric with some metadata about where the message came from and a field from the document that states what type it is. We also configure our metrics to be exported to Prometheus, and explicitly only allow our custom metric and some internal Bento metrics to emit.
 
 ```yaml
 pipeline:
@@ -102,8 +102,7 @@ metrics:
       "input_received",
       "output_sent"
     ].contains(this) { deleted() }
-  aws_cloudwatch:
-    namespace: ProdConsumer
+  prometheus: {}
 ```
 
 </TabItem>

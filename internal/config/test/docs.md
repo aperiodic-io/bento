@@ -25,8 +25,8 @@ Let's imagine we have a configuration file `foo.yaml` containing some processors
 
 ```yaml
 input:
-  kafka:
-    addresses: [ TODO ]
+  kafka_franz:
+    seed_brokers: [ TODO ]
     topics: [ foo, bar ]
     consumer_group: foogroup
 
@@ -256,21 +256,22 @@ Sometimes you'll want to write tests for a series of processors, where one or mo
 pipeline:
   processors:
     - mapping: 'root = "simon says: " + content()'
-    - label: get_foobar_api
-      http:
-        url: http://example.com/foobar
-        verb: GET
+    - label: get_foobar
+      cache:
+        resource: foobar_cache
+        operator: get
+        key: '${! content() }'
     - mapping: 'root = content().uppercase()'
 ```
 
-Rather than create a fake service for the `http` processor to interact with we can define a mock in our test definition that replaces it with a [`mapping` processor][processors.mapping]. Mocks are configured as a map of labels that identify a processor to replace and the config to replace it with:
+Rather than populate a real cache for the `cache` processor to read from we can define a mock in our test definition that replaces it with a [`mapping` processor][processors.mapping]. Mocks are configured as a map of labels that identify a processor to replace and the config to replace it with:
 
 ```yaml
 tests:
-  - name: mocks the http proc
+  - name: mocks the cache proc
     target_processors: '/pipeline/processors'
     mocks:
-      get_foobar_api:
+      get_foobar:
         mapping: 'root = content().string() + " this is some mock content"'
     input_batch:
       - content: "hello world"
@@ -278,7 +279,7 @@ tests:
       - - content_equals: "SIMON SAYS: HELLO WORLD THIS IS SOME MOCK CONTENT"
 ```
 
-With the above test definition the `http` processor will be swapped out for `mapping: 'root = content().string() + " this is some mock content"'`. For the purposes of mocking it is recommended that you use a [`mapping` processor][processors.mapping] that simply mutates the message in a way that you would expect the mocked processor to.
+With the above test definition the `cache` processor will be swapped out for `mapping: 'root = content().string() + " this is some mock content"'`. For the purposes of mocking it is recommended that you use a [`mapping` processor][processors.mapping] that simply mutates the message in a way that you would expect the mocked processor to.
 
 > Note: It's not currently possible to mock components that are imported as separate resource files (using `--resource`/`-r`). It is recommended that you mock these by maintaining separate definitions for test purposes (`-r "./test/*.yaml"`).
 
@@ -288,7 +289,7 @@ It is also possible to target specific fields within the test config by [JSON po
 
 ```yaml
 tests:
-  - name: mocks the http proc
+  - name: mocks the cache proc
     target_processors: '/pipeline/processors'
     mocks:
       /pipeline/processors/1:

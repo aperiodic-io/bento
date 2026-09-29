@@ -13,14 +13,6 @@ import (
 	"github.com/warpstreamlabs/bento/public/service"
 )
 
-func int64Field(conf *service.ParsedConfig, path ...string) (int64, error) {
-	i, err := conf.FieldInt(path...)
-	if err != nil {
-		return 0, err
-	}
-	return int64(i), nil
-}
-
 func getCredentialsCacheOptions(conf *service.ParsedConfig) func(*aws.CredentialsCacheOptions) {
 	expiryWindow, _ := conf.FieldDuration("expiry_window")
 	return func(cco *aws.CredentialsCacheOptions) {

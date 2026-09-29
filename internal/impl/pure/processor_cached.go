@@ -34,56 +34,7 @@ func newCachedProcessorConfigSpec() *service.ConfigSpec {
 		Field(service.NewInterpolatedStringField("ttl").
 			Description("An optional expiry period to set for each cache entry. Some caches only have a general TTL and will therefore ignore this setting.").
 			Optional()).
-		Field(service.NewProcessorListField("processors").Description("The list of processors whose result will be cached.")).
-		Example(
-			"Cached Enrichment",
-			"In the following example we want to we enrich messages consumed from Kafka with data specific to the origin topic partition, we do this by placing an `http` processor within a `branch`, where the HTTP URL contains interpolation functions with the topic and partition in the path.\n\nHowever, it would be inefficient to make this HTTP request for every single message as the result is consistent for all data of a given topic partition. We can solve this by placing our enrichment call within a `cached` processor where the key contains the topic and partition, resulting in messages that originate from the same topic/partition combination using the cached result of the prior.",
-			`
-pipeline:
-  processors:
-    - branch:
-        processors:
-          - cached:
-              key: '${! metadata("kafka_topic") }-${! metadata("kafka_partition").string() }'
-              cache: foo_cache
-              processors:
-                - mapping: 'root = ""'
-                - http:
-                    url: http://example.com/enrichment/${! metadata("kafka_topic") }/${! metadata("kafka_partition").string() }
-                    verb: GET
-        result_map: 'root.enrichment = this'
-
-cache_resources:
-  - label: foo_cache
-    memory:
-      # Disable compaction so that cached items never expire
-      compaction_interval: ""
-`,
-		).
-		Example(
-			"Periodic Global Enrichment",
-			"In the following example we enrich all messages with the same data obtained from a static URL with an `http` processor within a `branch`. However, we expect the data from this URL to change roughly every 10 minutes, so we configure a `cached` processor with a static key (since this request is consistent for all messages) and a TTL of `10m`.",
-			`
-pipeline:
-  processors:
-    - branch:
-        request_map: 'root = ""'
-        processors:
-          - cached:
-              key: static_foo
-              cache: foo_cache
-              ttl: 10m
-              processors:
-                - http:
-                    url: http://example.com/get/foo.json
-                    verb: GET
-        result_map: 'root.foo = this'
-
-cache_resources:
-  - label: foo_cache
-    memory: {}
-`,
-		)
+		Field(service.NewProcessorListField("processors").Description("The list of processors whose result will be cached."))
 }
 
 func init() {

@@ -40,29 +40,26 @@ func switchOutputSpec() *service.ConfigSpec {
 		Example(
 			"Basic Multiplexing",
 			`
-The most common use for a switch output is to multiplex messages across a range of output destinations. The following config checks the contents of the field `+"`type` of messages and sends `foo` type messages to an `amqp_1` output, `bar` type messages to a `gcp_pubsub` output, and everything else to a `redis_streams` output"+`.
+The most common use for a switch output is to multiplex messages across a range of output destinations. The following config checks the contents of the field `+"`type` of messages and sends `foo` type messages to an `aws_s3` output, `bar` type messages to a `file` output, and everything else to a `stdout` output"+`.
 
-Outputs can have their own processors associated with them, and in this example the `+"`redis_streams`"+` output has a processor that enforces the presence of a type field before sending it.`,
+Outputs can have their own processors associated with them, and in this example the `+"`stdout`"+` output has a processor that enforces the presence of a type field before sending it.`,
 			`
 output:
   switch:
     cases:
       - check: this.type == "foo"
         output:
-          amqp_1:
-            urls: [ amqps://guest:guest@localhost:5672/ ]
-            target_address: queue:/the_foos
+          aws_s3:
+            bucket: the_foos
+            path: ${! uuid_v4() }.json
 
       - check: this.type == "bar"
         output:
-          gcp_pubsub:
-            project: dealing_with_mike
-            topic: mikes_bars
+          file:
+            path: ./mikes_bars.jsonl
 
       - output:
-          redis_streams:
-            url: tcp://localhost:6379
-            stream: everything_else
+          stdout: {}
           processors:
             - mapping: |
                 root = this
@@ -81,16 +78,15 @@ output:
     cases:
       - check: 'this.user.interests.contains("walks").catch(false)'
         output:
-          amqp_1:
-            urls: [ amqps://guest:guest@localhost:5672/ ]
-            target_address: queue:/people_what_think_good
+          aws_s3:
+            bucket: people_what_think_good
+            path: ${! uuid_v4() }.json
         continue: true
 
       - check: 'this.user.dislikes.contains("videogames").catch(false)'
         output:
-          gcp_pubsub:
-            project: people
-            topic: that_i_dont_want_to_hang_with
+          file:
+            path: ./that_i_dont_want_to_hang_with.jsonl
 `,
 		).
 		LintRule(`if this.exists("retry_until_success") && this.retry_until_success {

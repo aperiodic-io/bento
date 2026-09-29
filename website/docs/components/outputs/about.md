@@ -37,13 +37,13 @@ It's possible to create fallback outputs for when an output target fails using a
 ```yaml
 output:
   fallback:
-    - aws_sqs:
-        url: https://sqs.us-west-2.amazonaws.com/TODO/TODO
+    - aws_s3:
+        bucket: TODO
+        path: '${! json("message.id") }.json'
         max_in_flight: 20
 
-    - http_client:
-        url: http://backup:1234/dlq
-        verb: POST
+    - file:
+        path: /var/lib/bento/dlq.jsonl
 ```
 
 ## Multiplexing Outputs
@@ -54,13 +54,13 @@ There are a few different ways of multiplexing in Bento, here's a quick run thro
 
 Some output fields support [field interpolation][interpolation], which is a super easy way to multiplex messages based on their contents in situations where you are multiplexing to the same service.
 
-For example, multiplexing against Kafka topics is a common pattern:
+For example, multiplexing against S3 key prefixes is a common pattern:
 
 ```yaml
 output:
-  kafka:
-    addresses: [ TODO:6379 ]
-    topic: ${! metadata("target_topic") }
+  aws_s3:
+    bucket: TODO
+    path: ${! metadata("target_prefix") }/${! uuid_v4() }.json
 ```
 
 Refer to the field documentation for a given output to see if it support interpolation.
@@ -75,20 +75,17 @@ output:
     cases:
       - check: this.type == "foo"
         output:
-          amqp_1:
-            urls: [ amqps://guest:guest@localhost:5672/ ]
-            target_address: queue:/the_foos
+          file:
+            path: /var/lib/bento/the_foos.jsonl
 
       - check: this.type == "bar"
         output:
-          gcp_pubsub:
-            project: dealing_with_mike
-            topic: mikes_bars
+          aws_s3:
+            bucket: dealing_with_mike
+            path: mikes_bars/${! uuid_v4() }.json
 
       - output:
-          redis_streams:
-            url: tcp://localhost:6379
-            stream: everything_else
+          stdout: {}
           processors:
             - mapping: |
                 root = this

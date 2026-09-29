@@ -38,7 +38,7 @@ input:
 
 <TabItem value="Cron Scheduled Processing">
 
-A common use case for the generate input is to trigger processors on a schedule so that the processors themselves can behave similarly to an input. The following configuration reads rows from a PostgreSQL table every 5 minutes.
+A common use case for the generate input is to trigger processors on a schedule so that the processors themselves can behave similarly to an input. The following configuration stamps a message with the time every 5 minutes.
 
 ```yaml
 input:
@@ -46,11 +46,7 @@ input:
     interval: '@every 5m'
     mapping: 'root = {}'
   processors:
-    - sql_select:
-        driver: postgres
-        dsn: postgres://foouser:foopass@localhost:5432/testdb?sslmode=disable
-        table: foo
-        columns: [ "*" ]
+    - mapping: 'root.checked_at = now()'
 ```
 
 </TabItem>

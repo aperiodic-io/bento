@@ -6,8 +6,8 @@ Bento allows you to dynamically set config fields with environment variables any
 
 ```yaml
 input:
-  kafka:
-    addresses: [ "${BROKERS}" ]
+  kafka_franz:
+    seed_brokers: [ "${BROKERS}" ]
     consumer_group: bento_bridge_consumer
     topics: [ "haha_business" ]
 ```
@@ -28,12 +28,12 @@ Some Bento fields also support [Bloblang][bloblang] function interpolations, whi
 
 ```yaml
 output:
-  kafka:
-    addresses: [ "TODO:6379" ]
-    topic: 'meow-${! json("topic") }'
+  aws_s3:
+    bucket: TODO
+    path: 'meow-${! json("topic") }/${! uuid_v4() }.json'
 ```
 
-A message with the contents `{"topic":"foo","message":"hello world"}` would be routed to the Kafka topic `meow-foo`.
+A message with the contents `{"topic":"foo","message":"hello world"}` would be written to the S3 bucket under the prefix `meow-foo/`.
 
 If a literal string is required that matches this pattern (`${!foo}`) then, similar to environment variables, you can escape it with double brackets. For example, the string `${{!foo}}` would be read as the literal `${!foo}`.
 
@@ -47,10 +47,9 @@ A common usecase for interpolated functions is dynamic routing at the output lev
 
 ```yaml
 output:
-  kafka:
-    addresses: [ TODO ]
-    topic: ${! metadata("output_topic") }
-    key: ${! metadata("key") }
+  aws_s3:
+    bucket: ${! metadata("output_bucket") }
+    path: ${! metadata("key") }
 ```
 
 ### Coalesce and Mapping

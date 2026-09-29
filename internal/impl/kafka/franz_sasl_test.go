@@ -65,7 +65,7 @@ sasl:
 		},
 	}
 
-	t.Run("GSSAPI missing keytab_path", func(t *testing.T) {
+	t.Run("GSSAPI, which this build does not have, is refused", func(t *testing.T) {
 		gssapiConf := `
 sasl:
   - mechanism: GSSAPI

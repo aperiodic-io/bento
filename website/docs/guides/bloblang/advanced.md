@@ -61,62 +61,6 @@ root = this.apply("unescape_values")
 # Out: {"first":{"nested":"foo & bar"},"second":10,"third":["1 < 2",{"also_nested":"2 > 1"}]}
 ```
 
-## Message Expansion
-
-Expanding a single message into multiple messages can be done by mapping messages into an array and following it up with an [`unarchive` processor][processors.unarchive]. For example, given documents of this format:
-
-```json
-{
-  "id": "foobar",
-  "items": [
-    {"content":"foo"},
-    {"content":"bar"},
-    {"content":"baz"}
-  ]
-}
-```
-
-We can pull `items` out to the root with `root = items` with a [`mapping` processor][processors.mapping] and follow it with an [`unarchive` processor][processors.unarchive] to expand each element into its own independent message:
-
-```yaml
-pipeline:
-  processors:
-    - mapping: root = this.items
-    - unarchive:
-        format: json_array
-```
-
-However, most of the time we also need to map the elements before expanding them, and often that includes copying fields outside of our target array. We can do that with methods such as `map_each` and `merge`:
-
-```coffee
-root = this.items.map_each(ele -> this.without("items").merge(ele))
-
-# In:  {"id":"foobar","items":[{"content":"foo"},{"content":"bar"},{"content":"baz"}]}
-# Out: [{"content":"foo","id":"foobar"},{"content":"bar","id":"foobar"},{"content":"baz","id":"foobar"}]
-```
-
-However, the above mapping is slightly inefficient as we would create a copy of our source object for each element with the `this.without("items")` part. A more efficient way to do this would be to capture that query within a variable:
-
-```coffee
-let doc_root = this.without("items")
-root = this.items.map_each($doc_root.merge(this))
-
-# In:  {"id":"foobar","items":[{"content":"foo"},{"content":"bar"},{"content":"baz"}]}
-# Out: [{"content":"foo","id":"foobar"},{"content":"bar","id":"foobar"},{"content":"baz","id":"foobar"}]
-```
-
-Also note that when we set `doc_root` we remove the field `items` from the target document. The full config would now be:
-
-```yaml
-pipeline:
-  processors:
-    - mapping: |
-        let doc_root = this.without("items")
-        root = this.items.map_each($doc_root.merge(this))
-    - unarchive:
-        format: json_array
-```
-
 ## Creating CSV
 
 Bento has a few different ways of outputting a stream of CSV data. However, the best way to do it is by converting the documents into CSV rows with Bloblang as this gives you full control over exactly how the schema is generated, erroneous data is handled, and escaping of column data is performed.
@@ -155,4 +99,3 @@ output:
 Perhaps the first expansion of this mapping that would be worthwhile is to add an explicit list of column names, or at least confirm that the number of values in a row matches an expected count.
 
 [processors.mapping]: /docs/components/processors/mapping
-[processors.unarchive]: /docs/components/processors/unarchive

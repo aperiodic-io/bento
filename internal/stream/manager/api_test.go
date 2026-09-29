@@ -2,13 +2,13 @@ package manager_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -21,6 +21,7 @@ import (
 	yaml "gopkg.in/yaml.v3"
 
 	"github.com/warpstreamlabs/bento/internal/bundle"
+	"github.com/warpstreamlabs/bento/internal/component/cache"
 	"github.com/warpstreamlabs/bento/internal/component/testutil"
 	"github.com/warpstreamlabs/bento/internal/config"
 	"github.com/warpstreamlabs/bento/internal/docs"
@@ -29,9 +30,35 @@ import (
 	"github.com/warpstreamlabs/bento/internal/message"
 	"github.com/warpstreamlabs/bento/internal/stream/manager"
 
+	"github.com/warpstreamlabs/bento/public/service"
+
 	_ "github.com/warpstreamlabs/bento/public/components/io"
 	_ "github.com/warpstreamlabs/bento/public/components/pure"
 )
+
+// manager_test_never_connects is an output that never connects, so the stream
+// holding it is never ready.
+func init() {
+	err := service.RegisterOutput("manager_test_never_connects", service.NewConfigSpec(),
+		func(*service.ParsedConfig, *service.Resources) (service.Output, int, error) {
+			return neverConnects{}, 1, nil
+		})
+	if err != nil {
+		panic(err)
+	}
+}
+
+type neverConnects struct{}
+
+func (neverConnects) Connect(context.Context) error {
+	return errors.New("never connects")
+}
+
+func (neverConnects) Write(context.Context, *service.Message) error {
+	return service.ErrNotConnected
+}
+
+func (neverConnects) Close(context.Context) error { return nil }
 
 func router(m *manager.Type) *mux.Router {
 	router := mux.NewRouter()
@@ -879,20 +906,11 @@ func TestTypeAPISetResources(t *testing.T) {
 
 	mgr := manager.New(bmgr)
 
-	tmpDir := t.TempDir()
-
-	dir1 := filepath.Join(tmpDir, "dir1")
-	require.NoError(t, os.MkdirAll(dir1, 0o750))
-
-	dir2 := filepath.Join(tmpDir, "dir2")
-	require.NoError(t, os.MkdirAll(dir2, 0o750))
-
 	r := router(mgr)
 
-	request := genYAMLRequest("POST", "/resources/cache/foocache?chilled=true", fmt.Sprintf(`
-file:
-  directory: %v
-`, dir1))
+	request := genYAMLRequest("POST", "/resources/cache/foocache?chilled=true", `
+memory: {}
+`)
 	hResponse := httptest.NewRecorder()
 	r.ServeHTTP(hResponse, request)
 	assert.Equal(t, http.StatusOK, hResponse.Code, hResponse.Body.String())
@@ -924,10 +942,22 @@ output:
 		t.Fatal("timed out")
 	}
 
-	request = genYAMLRequest("POST", "/resources/cache/foocache?chilled=true", fmt.Sprintf(`
-file:
-  directory: %v
-`, dir2))
+	cacheGet := func(key string) (string, error) {
+		var value []byte
+		var getErr error
+		require.NoError(t, bmgr.AccessCache(context.Background(), "foocache", func(c cache.V1) {
+			value, getErr = c.Get(context.Background(), key)
+		}))
+		return string(value), getErr
+	}
+	first, err := cacheGet("first")
+	require.NoError(t, err)
+	assert.Equal(t, `{"id":"first","content":"hello world"}`, first)
+
+	// a new cache under the same label: the stream writes to it from now on
+	request = genYAMLRequest("POST", "/resources/cache/foocache?chilled=true", `
+memory: {}
+`)
 	hResponse = httptest.NewRecorder()
 	r.ServeHTTP(hResponse, request)
 	assert.Equal(t, http.StatusOK, hResponse.Code, hResponse.Body.String())
@@ -943,21 +973,11 @@ file:
 		t.Fatal("timed out")
 	}
 
-	files, err := os.ReadDir(dir1)
+	_, err = cacheGet("first")
+	assert.Error(t, err, "the new cache holds only what was written after it replaced the old")
+	second, err := cacheGet("second")
 	require.NoError(t, err)
-	assert.Len(t, files, 1)
-
-	file1Bytes, err := os.ReadFile(filepath.Join(dir1, "first"))
-	require.NoError(t, err)
-	assert.Equal(t, `{"id":"first","content":"hello world"}`, string(file1Bytes))
-
-	files, err = os.ReadDir(dir2)
-	require.NoError(t, err)
-	assert.Len(t, files, 1)
-
-	file2Bytes, err := os.ReadFile(filepath.Join(dir2, "second"))
-	require.NoError(t, err)
-	assert.Equal(t, `{"id":"second","content":"hello world 2"}`, string(file2Bytes))
+	assert.Equal(t, `{"id":"second","content":"hello world 2"}`, second)
 }
 
 func TestAPIReady(t *testing.T) {
@@ -997,8 +1017,7 @@ input:
     interval: ""
 
 output:
-  websocket:
-    url: not**a**valid**url
+  manager_test_never_connects: {}
 `)
 	response = httptest.NewRecorder()
 	r.ServeHTTP(response, request)

@@ -4,23 +4,23 @@ status: experimental
 summary: This is a test template to check that plugin aliases work.
 
 fields:
-  - name: url
-    description: the url of the thing.
+  - name: duration
+    description: how long to sleep for.
     type: string
-    default: http://defaultschemas.example.com
+    default: 1s
 
-mapping: 'root.schema_registry_decode.url = this.url'
+mapping: 'root.sleep.duration = this.duration'
 
 tests:
   - name: Basic fields
     config:
-      url: 'http://schemas.example.com'
+      duration: 5s
     expected:
-      schema_registry_decode:
-        url: 'http://schemas.example.com'
+      sleep:
+        duration: 5s
 
   - name: Use Default
     config: {}
     expected:
-      schema_registry_decode:
-        url: 'http://defaultschemas.example.com'
+      sleep:
+        duration: 1s

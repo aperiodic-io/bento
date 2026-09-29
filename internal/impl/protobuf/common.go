@@ -2,6 +2,9 @@ package protobuf
 
 import (
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 
 	"github.com/jhump/protoreflect/desc/protoparse"
 	"google.golang.org/protobuf/reflect/protoregistry"
@@ -43,4 +46,31 @@ func RegistriesFromMap(filesMap map[string]string) (*protoregistry.Files, *proto
 		}
 	}
 	return files, types, nil
+}
+
+// loadDescriptors parses every .proto file under importPaths.
+func loadDescriptors(f fs.FS, importPaths []string) (*protoregistry.Files, *protoregistry.Types, error) {
+	files := map[string]string{}
+	for _, importPath := range importPaths {
+		if err := fs.WalkDir(f, importPath, func(path string, info fs.DirEntry, ferr error) error {
+			if ferr != nil || info.IsDir() {
+				return ferr
+			}
+			if filepath.Ext(info.Name()) == ".proto" {
+				rPath, ferr := filepath.Rel(importPath, path)
+				if ferr != nil {
+					return fmt.Errorf("failed to get relative path: %v", ferr)
+				}
+				content, ferr := os.ReadFile(path)
+				if ferr != nil {
+					return fmt.Errorf("failed to read import %v: %v", path, ferr)
+				}
+				files[rPath] = string(content)
+			}
+			return nil
+		}); err != nil {
+			return nil, nil, err
+		}
+	}
+	return RegistriesFromMap(files)
 }

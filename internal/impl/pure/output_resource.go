@@ -29,12 +29,11 @@ output:
   broker:
     pattern: fan_out
     outputs:
-    - kafka:
-        addresses: [ TODO ]
-        topic: foo
-    - gcp_pubsub:
-        project: bar
-        topic: baz
+    - aws_s3:
+        bucket: foo
+        path: ${! uuid_v4() }.json
+    - file:
+        path: ./bar.jsonl
 `+"```"+`
 
 Could also be expressed as:
@@ -49,14 +48,13 @@ output:
 
 output_resources:
   - label: foo
-    kafka:
-      addresses: [ TODO ]
-      topic: foo
+    aws_s3:
+      bucket: foo
+      path: ${! uuid_v4() }.json
 
   - label: bar
-    gcp_pubsub:
-      project: bar
-      topic: baz
+    file:
+      path: ./bar.jsonl
  `+"```"+`
 
 You can find out more about resources [in this document.](/docs/configuration/resources)`).

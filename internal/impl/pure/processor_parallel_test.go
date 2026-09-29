@@ -2,10 +2,8 @@ package pure_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -19,6 +17,8 @@ import (
 	"github.com/warpstreamlabs/bento/internal/manager/mock"
 	"github.com/warpstreamlabs/bento/internal/message"
 
+	"github.com/warpstreamlabs/bento/public/service"
+
 	_ "github.com/warpstreamlabs/bento/internal/impl/pure"
 )
 
@@ -30,22 +30,69 @@ func parseYAMLConf(t testing.TB, formatStr string, args ...any) (conf processor.
 	return
 }
 
+// testFuncs are the functions pure_test_func processors run, by name.
+var testFuncs sync.Map
+
+// pure_test_func runs the function of its name on each message: its result
+// replaces the message, and its error flags it.
+func init() {
+	err := service.RegisterProcessor("pure_test_func", service.NewConfigSpec().Field(service.NewStringField("name")),
+		func(conf *service.ParsedConfig, _ *service.Resources) (service.Processor, error) {
+			name, err := conf.FieldString("name")
+			if err != nil {
+				return nil, err
+			}
+			fn, ok := testFuncs.Load(name)
+			if !ok {
+				return nil, fmt.Errorf("no test function %v", name)
+			}
+			return testFuncProc(fn.(func(context.Context, []byte) ([]byte, error))), nil
+		})
+	if err != nil {
+		panic(err)
+	}
+}
+
+type testFuncProc func(context.Context, []byte) ([]byte, error)
+
+func (f testFuncProc) Process(ctx context.Context, m *service.Message) (service.MessageBatch, error) {
+	b, err := m.AsBytes()
+	if err != nil {
+		return nil, err
+	}
+	out, err := f(ctx, b)
+	if err != nil {
+		return nil, err
+	}
+	m.SetBytes(out)
+	return service.MessageBatch{m}, nil
+}
+
+func (f testFuncProc) Close(context.Context) error { return nil }
+
+// testFunc registers fn for a pure_test_func processor and returns its name.
+func testFunc(t *testing.T, fn func(context.Context, []byte) ([]byte, error)) string {
+	testFuncs.Store(t.Name(), fn)
+	t.Cleanup(func() { testFuncs.Delete(t.Name()) })
+	return t.Name()
+}
+
 func TestParallelBasic(t *testing.T) {
+	// every message waits for all five: they are processed at once
 	wg := sync.WaitGroup{}
 	wg.Add(5)
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	name := testFunc(t, func(context.Context, []byte) ([]byte, error) {
 		wg.Done()
 		wg.Wait()
-		_, _ = w.Write([]byte("foobar"))
-	}))
-	defer ts.Close()
+		return []byte("foobar"), nil
+	})
 
 	conf := parseYAMLConf(t, `
 parallel:
   processors:
-    - http:
-        url: %v/testpost
-`, ts.URL)
+    - pure_test_func:
+        name: %v
+`, name)
 
 	h, err := mock.NewManager().NewProcessor(conf)
 	if err != nil {
@@ -71,28 +118,21 @@ parallel:
 func TestParallelError(t *testing.T) {
 	wg := sync.WaitGroup{}
 	wg.Add(5)
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	name := testFunc(t, func(_ context.Context, b []byte) ([]byte, error) {
 		wg.Done()
 		wg.Wait()
-		reqBytes, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Fatal(err)
+		if string(b) == "baz" {
+			return nil, errors.New("test error")
 		}
-		if string(reqBytes) == "baz" {
-			http.Error(w, "test error", http.StatusForbidden)
-			return
-		}
-		_, _ = w.Write([]byte("foobar"))
-	}))
-	defer ts.Close()
+		return []byte("foobar"), nil
+	})
 
 	conf := parseYAMLConf(t, `
 parallel:
   processors:
-    - http:
-        url: %v/testpost
-        retries: 0
-`, ts.URL)
+    - pure_test_func:
+        name: %v
+`, name)
 
 	h, err := mock.NewManager().NewProcessor(conf)
 	if err != nil {
@@ -126,23 +166,22 @@ parallel:
 
 func TestParallelCapped(t *testing.T) {
 	var reqs atomic.Int64
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	name := testFunc(t, func(context.Context, []byte) ([]byte, error) {
 		if req := reqs.Add(1); req > 5 {
 			t.Errorf("Beyond parallelism cap: %v", req)
 		}
 		<-time.After(time.Millisecond * 10)
-		_, _ = w.Write([]byte("foobar"))
 		reqs.Add(-1)
-	}))
-	defer ts.Close()
+		return []byte("foobar"), nil
+	})
 
 	conf := parseYAMLConf(t, `
 parallel:
   cap: 5
   processors:
-    - http:
-        url: %v/testpost
-`, ts.URL)
+    - pure_test_func:
+        name: %v
+`, name)
 
 	h, err := mock.NewManager().NewProcessor(conf)
 	if err != nil {

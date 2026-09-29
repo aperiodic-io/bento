@@ -81,13 +81,13 @@ output:
     cases:
       - check: metadata("grouping") == "foo"
         output:
-          gcp_pubsub:
-            project: foo_prod
-            topic: only_the_foos
+          aws_s3:
+            bucket: foo_prod
+            path: only_the_foos/${! uuid_v4() }.tar.gz
       - output:
-          gcp_pubsub:
-            project: somewhere_else
-            topic: no_foos_here
+          aws_s3:
+            bucket: somewhere_else
+            path: no_foos_here/${! uuid_v4() }.tar.gz
 ```
 
 </TabItem>

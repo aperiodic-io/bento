@@ -2,6 +2,7 @@ package pure
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -9,6 +10,40 @@ import (
 
 	"github.com/warpstreamlabs/bento/public/service"
 )
+
+// pure_test_split_json_array makes a message of each element of a JSON array,
+// a processor that turns one message into a batch of several.
+func init() {
+	err := service.RegisterProcessor("pure_test_split_json_array", service.NewConfigSpec(),
+		func(*service.ParsedConfig, *service.Resources) (service.Processor, error) {
+			return splitJSONArrayProc{}, nil
+		})
+	if err != nil {
+		panic(err)
+	}
+}
+
+type splitJSONArrayProc struct{}
+
+func (splitJSONArrayProc) Process(_ context.Context, m *service.Message) (service.MessageBatch, error) {
+	v, err := m.AsStructured()
+	if err != nil {
+		return nil, err
+	}
+	arr, ok := v.([]any)
+	if !ok {
+		return nil, fmt.Errorf("not an array: %T", v)
+	}
+	var out service.MessageBatch
+	for _, ele := range arr {
+		part := m.Copy()
+		part.SetStructured(ele)
+		out = append(out, part)
+	}
+	return out, nil
+}
+
+func (splitJSONArrayProc) Close(context.Context) error { return nil }
 
 func TestCachedHappy(t *testing.T) {
 	conf, err := newCachedProcessorConfigSpec().ParseYAML(`
@@ -97,8 +132,7 @@ ttl: ${! meta("ttl").or("60s")}
 cache: foo
 processors:
   - bloblang: 'root = this.map_each(ele -> ele + " FOO")'
-  - unarchive:
-      format: json_array
+  - pure_test_split_json_array: {}
 `, nil)
 	require.NoError(t, err)
 
