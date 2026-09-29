@@ -161,11 +161,12 @@ type jsonParquetEncoder struct {
 	mDropped *service.MetricCounter
 	mFiles   *service.MetricCounter
 
-	schema  *parquet.Schema
-	codec   parquet.WriterOption
-	columns []jpeColumn
-	byName  map[string]int
-	nanNull bool
+	schema   *parquet.Schema
+	codec    parquet.WriterOption
+	columns  []jpeColumn
+	byName   map[string]int
+	byQuoted map[string]int // byName, by each name as JSON quotes it
+	nanNull  bool
 
 	partition     []jpePart
 	divisor       float64
@@ -186,6 +187,7 @@ func newJSONParquetEncoder(conf *service.ParsedConfig, mgr *service.Resources) (
 		mDropped: mgr.Metrics().NewCounter("json_parquet_encode_dropped"),
 		mFiles:   mgr.Metrics().NewCounter("json_parquet_encode_files"),
 		byName:   map[string]int{},
+		byQuoted: map[string]int{},
 	}
 
 	fields, err := conf.FieldObjectList("schema")
@@ -221,7 +223,12 @@ func newJSONParquetEncoder(conf *service.ParsedConfig, mgr *service.Resources) (
 		if _, exists := e.byName[name]; exists {
 			return nil, fmt.Errorf("column '%v' is defined twice", name)
 		}
+		quoted, err := jsontext.AppendQuote(nil, name)
+		if err != nil {
+			return nil, fmt.Errorf("column '%v': %w", name, err)
+		}
 		e.byName[name] = len(e.columns)
+		e.byQuoted[string(quoted)] = len(e.columns)
 		e.columns = append(e.columns, jpeColumn{name: name, kind: kind, optional: optional})
 	}
 
@@ -464,7 +471,7 @@ func (e *jsonParquetEncoder) parse(dec *jsontext.Decoder, src *bytes.Reader, raw
 		if err != nil {
 			return fmt.Errorf("not JSON: %w", err)
 		}
-		i, ok := e.byName[string(r.unquoteString(name))]
+		i, ok := e.column(r, name)
 		if !ok || e.columns[i].interp != nil {
 			if err := dec.SkipValue(); err != nil {
 				return fmt.Errorf("not JSON: %w", err)
@@ -498,6 +505,22 @@ func (e *jsonParquetEncoder) parse(dec *jsontext.Decoder, src *bytes.Reader, raw
 		return fmt.Errorf("not JSON: %w", err)
 	}
 	return nil
+}
+
+// column returns the column a member name, as raw JSON, names. A name as JSON
+// quotes it, the name's own bytes when it needs no escape, is found as it is;
+// one that is not so quoted, with an escape or invalid UTF-8, is unquoted to
+// be found. A name quoted otherwise cannot name a column: were it to unquote
+// to one, it would be that name's own bytes, which is how JSON quotes it.
+func (e *jsonParquetEncoder) column(r *jpeRow, name []byte) (int, bool) {
+	if i, ok := e.byQuoted[string(name)]; ok {
+		return i, true
+	}
+	if inner := name[1 : len(name)-1]; bytes.IndexByte(inner, '\\') < 0 && utf8.Valid(inner) {
+		return 0, false
+	}
+	i, ok := e.byName[string(r.unquoteString(name))]
+	return i, ok
 }
 
 // jpeUnsafeString views b as a string for a call that neither keeps nor

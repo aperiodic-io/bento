@@ -3,8 +3,10 @@ package parquet
 import (
 	"bytes"
 	"context"
+	"encoding/json/jsontext"
 	"fmt"
 	"math"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -315,5 +317,38 @@ partition: { path: '{p}' }
 		out, err := e.ProcessBatch(context.Background(), batch)
 		require.NoError(b, err)
 		require.Nil(b, out)
+	}
+}
+
+func TestJSONParquetEncodeColumnLookup(t *testing.T) {
+	// A member name is looked up by its JSON as it is when that is how JSON
+	// quotes a column's name, and unquoted otherwise: it must find what
+	// unquoting every name would.
+	names := []string{"a", "symbol", "q\"uote", "back\\slash", "<&>", "line\u2028sep", "del\x7f", "é😀", "tab\t"}
+	e := &jsonParquetEncoder{byName: map[string]int{}, byQuoted: map[string]int{}}
+	for i, n := range names {
+		quoted, err := jsontext.AppendQuote(nil, n)
+		require.NoError(t, err)
+		e.byName[n], e.byQuoted[string(quoted)] = i, i
+	}
+	var literals []string
+	for _, n := range append(names, "b", "symbol2", "", "\xff", "a\xff") {
+		quoted, _ := jsontext.AppendQuote(nil, n)
+		literals = append(literals, string(quoted), `"`+n+`"`)
+		var escaped strings.Builder
+		for _, c := range n {
+			fmt.Fprintf(&escaped, `\u%04x`, c)
+		}
+		literals = append(literals, `"`+escaped.String()+`"`)
+	}
+	r := newJPERow(0)
+	for _, lit := range literals {
+		if _, err := jsontext.AppendUnquote(nil, lit); err != nil && !strings.Contains(err.Error(), "UTF-8") {
+			continue // not a string JSON would read
+		}
+		wantI, wantOK := e.byName[string(r.unquoteString([]byte(lit)))]
+		gotI, gotOK := e.column(r, []byte(lit))
+		assert.Equal(t, wantOK, gotOK, "%q", lit)
+		assert.Equal(t, wantI, gotI, "%q", lit)
 	}
 }
