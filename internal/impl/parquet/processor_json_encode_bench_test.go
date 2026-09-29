@@ -88,44 +88,61 @@ func BenchmarkJSONParquetHeldBatch(b *testing.B) {
 	})
 }
 
-// BenchmarkJSONParquetEncode runs a full batch through each pipeline, and
-// reports the heap's peak above what it held before the batch.
+// fewPartitions is archiveSchema partitioned as the archiver's example is, by
+// exchange and day: a dozen files a batch rather than hundreds.
+var fewPartitions = func() paritySchema {
+	s := archiveSchema
+	s.partition = "exchange={exchange}/{time|year=2006/month=01/day=02}"
+	s.legacyPartition = `"exchange=%s/%s".format(root.exchange, (this.time / 1000000).ts_format("year=2006/month=01/day=02", "UTC"))`
+	return s
+}()
+
+// BenchmarkJSONParquetEncode runs a full batch through each pipeline, split
+// into many files and into few, and reports the heap's peak above what it held
+// before the batch.
 func BenchmarkJSONParquetEncode(b *testing.B) {
 	in := benchBatch(b)
 	raw := 0
 	for _, m := range in {
 		raw += len(m.body)
 	}
-	p := pairFor(b, archiveSchema)
-	for name, s := range map[string]*parityStream{"legacy": p.legacy, "json_parquet_encode": p.next} {
-		b.Run(name, func(b *testing.B) {
-			b.SetBytes(int64(raw))
-			b.ReportAllocs()
-			var peakSum float64
-			for i := 0; i < b.N; i++ {
-				before := liveHeap()
-				var peak atomic.Uint64
-				done := make(chan struct{})
-				go func() {
-					t := time.NewTicker(time.Millisecond)
-					defer t.Stop()
-					for {
-						select {
-						case <-done:
-							return
-						case <-t.C:
-							if h := heapBytes(); h > peak.Load() {
-								peak.Store(h)
+	for _, partitions := range []struct {
+		name   string
+		schema paritySchema
+	}{{"many_files", archiveSchema}, {"few_files", fewPartitions}} {
+		p := pairFor(b, partitions.schema)
+		for name, s := range map[string]*parityStream{"legacy": p.legacy, "json_parquet_encode": p.next} {
+			b.Run(partitions.name+"/"+name, func(b *testing.B) {
+				b.SetBytes(int64(raw))
+				b.ReportAllocs()
+				var peakSum, files float64
+				for i := 0; i < b.N; i++ {
+					before := liveHeap()
+					var peak atomic.Uint64
+					done := make(chan struct{})
+					go func() {
+						t := time.NewTicker(time.Millisecond)
+						defer t.Stop()
+						for {
+							select {
+							case <-done:
+								return
+							case <-t.C:
+								if h := heapBytes(); h > peak.Load() {
+									peak.Store(h)
+								}
 							}
 						}
-					}
-				}()
-				files := s.run(b, in)
-				close(done)
-				require.NotEmpty(b, files)
-				peakSum += float64(peak.Load()-min(before, peak.Load())) / (1 << 20)
-			}
-			b.ReportMetric(peakSum/float64(b.N), "peak-heap-MiB")
-		})
+					}()
+					out := s.run(b, in)
+					close(done)
+					require.NotEmpty(b, out)
+					files = float64(len(out))
+					peakSum += float64(peak.Load()-min(before, peak.Load())) / (1 << 20)
+				}
+				b.ReportMetric(peakSum/float64(b.N), "peak-heap-MiB")
+				b.ReportMetric(files, "files")
+			})
+		}
 	}
 }
