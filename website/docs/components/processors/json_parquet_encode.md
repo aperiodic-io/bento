@@ -77,7 +77,7 @@ A message that is not a single JSON object, or that any column rejects, is dropp
 
 When `partition` is set the batch is split into one Parquet file per distinct partition path, in order of first appearance, and the path is written to the configured metadata key. `{column}` in the path is replaced by the column's value as Bloblang's `format` would print the field, and `{column|layout}` by the column's number, read in `time_unit`, as a UTC time in the Go layout. Every output message carries the metadata of the first message of its partition, and the files written are counted in `json_parquet_encode_files`.
 
-Every file costs something of its own: a footer, pages begun for each column, and, when it has an empty string, a new writer. Encoding a batch as hundreds of small files takes about a third more time and half as much memory again as encoding it as a couple of dozen, and leaves many small objects to store and query. Prefer a coarse partition path, and batches closed by size rather than time where the rate allows.
+Every file costs something of its own: a footer, pages begun for each column, and, when a text column holds a single value and it is empty, or the file is large and holds an empty string, a writer of its own. Encoding a batch as hundreds of small files takes about a third more time and half as much memory again as encoding it as a couple of dozen, and leaves many small objects to store and query. Prefer a coarse partition path, and batches closed by size rather than time where the rate allows.
 
 ## Examples
 
