@@ -168,6 +168,20 @@ func TestJSONParquetParityPartitions(t *testing.T) {
 	}
 }
 
+func TestJSONParquetParityOptionalPartitionField(t *testing.T) {
+	// an optional field in the path, present, absent and null in turn, so an
+	// absent one cannot be read as the previous message's
+	s := archiveSchema
+	s.partition = "{count_opt}/{time|2006}"
+	s.legacyPartition = `"%s/%s".format(this.count_opt, (this.time / 1000000).ts_format("2006", "UTC"))`
+	var in []parityInput
+	for _, v := range []string{`5`, missing, `"x"`, missing, `null`, `7`, missing} {
+		in = append(in, parityInput{topic: parityTopic, body: rowWith("count_opt", v)})
+	}
+	files := requireParity(t, s, in)
+	require.Greater(t, len(files), 2)
+}
+
 // randomRow draws a row as production would send one, and now and then
 // corrupts a field or the whole message.
 func randomRow(r *rand.Rand) parityInput {

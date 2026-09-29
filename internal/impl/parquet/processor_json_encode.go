@@ -10,7 +10,10 @@ import (
 	"io"
 	"math"
 	"reflect"
+	"strconv"
 	"strings"
+	"unicode/utf8"
+	"unsafe"
 
 	"github.com/parquet-go/parquet-go"
 
@@ -315,13 +318,55 @@ func (e *jsonParquetEncoder) parsePartitionPath(path string) ([]jpePart, error) 
 
 //------------------------------------------------------------------------------
 
-// jpeRow holds the fields of one message the schema reads, as the Go values
-// Bento's own JSON decoding gives them (string, json.Number, bool, nil, or a
-// map or slice for a nested value), so coercion runs the very functions
-// Bloblang's methods do.
+// jpeRow holds the fields of one message the schema reads, each as the kind
+// of its JSON value and its content, copied into buf: a string's decoded text,
+// a number's literal, or a nested value's raw JSON. Coercion parses the content
+// as the functions Bloblang's methods do would parse the Go value Bento's own
+// JSON decoding gives the field (string, json.Number, bool, nil, or a map or
+// slice), and hands them that value itself where it is not a string or number.
 type jpeRow struct {
 	present []bool
-	values  []any
+	kind    []byte // '"', '0', 't', 'f', 'n', '{' or '['
+	start   []int
+	end     []int
+	buf     []byte
+	unquote []byte
+}
+
+func newJPERow(columns int) *jpeRow {
+	return &jpeRow{
+		present: make([]bool, columns),
+		kind:    make([]byte, columns),
+		start:   make([]int, columns),
+		end:     make([]int, columns),
+	}
+}
+
+// content is the content of field i, valid until the next message is parsed.
+func (r *jpeRow) content(i int) []byte {
+	return r.buf[r.start[i]:r.end[i]]
+}
+
+// goValue is field i as Bento's JSON decoding gives it.
+func (r *jpeRow) goValue(i int) (any, error) {
+	c := r.content(i)
+	switch r.kind[i] {
+	case '"':
+		return string(c), nil
+	case '0':
+		return json.Number(c), nil
+	case 't':
+		return true, nil
+	case 'f':
+		return false, nil
+	case 'n':
+		return nil, nil
+	}
+	nested := json.NewDecoder(bytes.NewReader(c))
+	nested.UseNumber()
+	var out any
+	err := nested.Decode(&out)
+	return out, err
 }
 
 // jpeDecodeOptions make jsontext read a document as encoding/json does, and so
@@ -332,13 +377,31 @@ var jpeDecodeOptions = []jsontext.Options{
 	jsontext.AllowInvalidUTF8(true),
 }
 
+// unquote returns the text of a JSON string as jsontext.Token.String would: the
+// literal's own bytes when it has no escape and is valid UTF-8, and its decoding,
+// with invalid UTF-8 mangled into U+FFFD, otherwise. The result is only valid
+// until the next call.
+func (r *jpeRow) unquoteString(lit []byte) []byte {
+	inner := lit[1 : len(lit)-1]
+	if bytes.IndexByte(inner, '\\') < 0 && utf8.Valid(inner) {
+		return inner
+	}
+	// The error only reports invalid UTF-8, which is mangled as it should be.
+	r.unquote, _ = jsontext.AppendUnquote(r.unquote[:0], lit)
+	return r.unquote
+}
+
 // parse reads one message into r. It fails where Bento's own decoding of the
 // message would: anything but exactly one JSON document. A document that is not
 // an object fails too, which only drops what the coercion would have dropped
 // anyway, since a schema read from the message has at least one column.
 func (e *jsonParquetEncoder) parse(dec *jsontext.Decoder, src *bytes.Reader, raw []byte, r *jpeRow) error {
 	clear(r.present)
-	clear(r.values)
+	for i := range r.kind { // an absent field reads as null, as nil did
+		r.kind[i] = 'n'
+		r.start[i], r.end[i] = 0, 0
+	}
+	r.buf = r.buf[:0]
 	src.Reset(raw)
 	dec.Reset(src, jpeDecodeOptions...)
 
@@ -350,20 +413,32 @@ func (e *jsonParquetEncoder) parse(dec *jsontext.Decoder, src *bytes.Reader, raw
 		return fmt.Errorf("not a JSON object but %v", tok.Kind())
 	}
 	for dec.PeekKind() != '}' {
-		name, err := dec.ReadToken()
+		name, err := dec.ReadValue()
 		if err != nil {
 			return fmt.Errorf("not JSON: %w", err)
 		}
-		i, ok := e.byName[name.String()]
+		i, ok := e.byName[string(r.unquoteString(name))]
 		if !ok || e.columns[i].interp != nil {
 			if err := dec.SkipValue(); err != nil {
 				return fmt.Errorf("not JSON: %w", err)
 			}
 			continue
 		}
-		if r.values[i], err = jpeGoValue(dec); err != nil {
+		v, err := dec.ReadValue()
+		if err != nil {
 			return fmt.Errorf("not JSON: %w", err)
 		}
+		kind := v[0]
+		switch kind {
+		case '"':
+			v = r.unquoteString(v)
+		case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+			kind = '0'
+		}
+		r.kind[i] = kind
+		r.start[i] = len(r.buf)
+		r.buf = append(r.buf, v...)
+		r.end[i] = len(r.buf)
 		r.present[i] = true
 	}
 	if _, err := dec.ReadToken(); err != nil { // the closing '}'
@@ -378,45 +453,25 @@ func (e *jsonParquetEncoder) parse(dec *jsontext.Decoder, src *bytes.Reader, raw
 	return nil
 }
 
-// jpeGoValue reads the next JSON value as Bento's decoding gives it.
-func jpeGoValue(dec *jsontext.Decoder) (any, error) {
-	switch dec.PeekKind() {
-	case '{', '[':
-		v, err := dec.ReadValue()
-		if err != nil {
-			return nil, err
-		}
-		nested := json.NewDecoder(bytes.NewReader(v))
-		nested.UseNumber()
-		var out any
-		err = nested.Decode(&out)
-		return out, err
-	}
-	tok, err := dec.ReadToken()
-	if err != nil {
-		return nil, err
-	}
-	switch tok.Kind() {
-	case '"':
-		return tok.String(), nil
-	case '0':
-		return json.Number(tok.String()), nil
-	case 't':
-		return true, nil
-	case 'f':
-		return false, nil
-	}
-	return nil, nil
+// jpeUnsafeString views b as a string for a call that neither keeps nor
+// returns it (strconv copies the input into the errors it returns).
+func jpeUnsafeString(b []byte) string {
+	return unsafe.String(unsafe.SliceData(b), len(b))
 }
 
-// value coerces column i of r, as the column's Bloblang coercion would, into
-// the Parquet value of its leaf.
-func (e *jsonParquetEncoder) value(c *jpeColumn, present bool, v any) (parquet.Value, error) {
+// value coerces field i of r, as the column's Bloblang coercion would, into the
+// Parquet value of the column's leaf. A string or number is parsed by the very
+// strconv call the coercion would make of it (json.Number's Int64 and Float64
+// parse in base 10, a string's integer in any base Go literals use); anything
+// else is handed to the coercion itself.
+func (e *jsonParquetEncoder) value(c *jpeColumn, r *jpeRow, i int) (parquet.Value, error) {
 	def := 0
 	if c.optional {
 		def = 1
 	}
-	if !present || v == nil {
+	present, kind := r.present[i], r.kind[i]
+	var v any // set for the coercion when the field is neither a string nor a number
+	if !present || kind == 'n' {
 		switch {
 		case c.optional:
 			return parquet.NullValue().Level(0, 0, c.leaf), nil
@@ -427,42 +482,65 @@ func (e *jsonParquetEncoder) value(c *jpeColumn, present bool, v any) (parquet.V
 		default:
 			return parquet.Value{}, errors.New("value is null")
 		}
+	} else if kind != '"' && kind != '0' {
+		var err error
+		if v, err = r.goValue(i); err != nil {
+			return parquet.Value{}, err
+		}
 	}
+	content := jpeUnsafeString(r.content(i))
 	var pv parquet.Value
 	switch c.kind {
 	case jpeUTF8:
-		pv = parquet.ByteArrayValue([]byte(jpeString(v)))
-	case jpeInt32:
-		i, err := value.IToInt32(v)
+		if v != nil {
+			pv = parquet.ByteArrayValue([]byte(value.IToString(v)))
+		} else {
+			pv = parquet.ByteArrayValue([]byte(content))
+		}
+	case jpeInt32, jpeInt64:
+		var n int64
+		var err error
+		switch {
+		case v != nil:
+			n, err = value.IToInt(v)
+		case kind == '0':
+			n, err = strconv.ParseInt(content, 10, 64)
+		default:
+			n, err = strconv.ParseInt(content, 0, 64)
+		}
 		if err != nil {
 			return parquet.Value{}, err
 		}
-		pv = parquet.Int32Value(i)
-	case jpeInt64:
-		i, err := value.IToInt(v)
+		if c.kind == jpeInt64 {
+			pv = parquet.Int64Value(n)
+			break
+		}
+		// value.IToInt32's bounds
+		if n > math.MaxInt32 {
+			return parquet.Value{}, errors.New("value is too large to be cast as a 32-bit signed integer")
+		}
+		if n < math.MinInt32 {
+			return parquet.Value{}, errors.New("value is too small to be cast as a 32-bit signed integer")
+		}
+		pv = parquet.Int32Value(int32(n))
+	case jpeFloat, jpeDouble:
+		var f float64
+		var err error
+		if v != nil {
+			f, err = value.IToNumber(v)
+		} else {
+			f, err = strconv.ParseFloat(content, 64)
+		}
 		if err != nil {
 			return parquet.Value{}, err
 		}
-		pv = parquet.Int64Value(i)
-	case jpeFloat:
-		f, err := value.IToNumber(v)
-		if err != nil {
-			return parquet.Value{}, err
+		if c.kind == jpeFloat {
+			pv = parquet.FloatValue(float32(f))
+		} else {
+			pv = parquet.DoubleValue(f)
 		}
-		pv = parquet.FloatValue(float32(f))
-	case jpeDouble:
-		f, err := value.IToNumber(v)
-		if err != nil {
-			return parquet.Value{}, err
-		}
-		pv = parquet.DoubleValue(f)
 	}
 	return pv.Level(0, def, c.leaf), nil
-}
-
-// jpeString is Bloblang's .string(), whose objects are marshalled by gabs.
-func jpeString(v any) string {
-	return value.IToString(v)
 }
 
 // appendPartitionPath appends the partition path of a row to b, as the
@@ -475,10 +553,27 @@ func (e *jsonParquetEncoder) appendPartitionPath(b []byte, r *jpeRow, interpolat
 			b = append(b, p.literal...)
 		case e.columns[p.column].interp != nil:
 			b = append(b, interpolated[p.column]...)
+		case p.layout == "" && (r.kind[p.column] == '"' || r.kind[p.column] == '0'):
+			// "%s" prints a string or json.Number as its text
+			b = append(b, r.content(p.column)...)
 		case p.layout == "":
-			b = fmt.Appendf(b, "%s", r.values[p.column])
+			v, err := r.goValue(p.column)
+			if err != nil {
+				return b, fmt.Errorf("partition: %v: %w", e.columns[p.column].name, err)
+			}
+			b = fmt.Appendf(b, "%s", v)
 		default:
-			n, err := value.IGetNumber(r.values[p.column])
+			var n float64
+			var err error
+			if r.kind[p.column] == '0' {
+				// json.Number's Float64
+				n, err = strconv.ParseFloat(jpeUnsafeString(r.content(p.column)), 64)
+			} else {
+				var v any
+				if v, err = r.goValue(p.column); err == nil {
+					n, err = value.IGetNumber(v)
+				}
+			}
 			if err != nil {
 				return b, fmt.Errorf("partition: %v: %w", e.columns[p.column].name, err)
 			}
@@ -512,7 +607,7 @@ func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.Mes
 		current      *jpeGroup
 		src          bytes.Reader
 		dec          = jsontext.NewDecoder(&src, jpeDecodeOptions...)
-		row          = &jpeRow{present: make([]bool, len(e.columns)), values: make([]any, len(e.columns))}
+		row          = newJPERow(len(e.columns))
 		interpolated = make([]string, len(e.columns))
 		key          []byte
 		dropped      int
@@ -543,7 +638,7 @@ func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.Mes
 				values[c.leaf] = parquet.ByteArrayValue([]byte(interpolated[i])).Level(0, 0, c.leaf)
 				continue
 			}
-			if values[c.leaf], err = e.value(c, row.present[i], row.values[i]); err != nil {
+			if values[c.leaf], err = e.value(c, row, i); err != nil {
 				err = fmt.Errorf("%v: %w", c.name, err)
 				break
 			}
