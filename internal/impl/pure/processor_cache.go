@@ -76,8 +76,7 @@ pipeline:
 
 cache_resources:
   - label: foocache
-    redis:
-      url: tcp://TODO:6379
+    memory: {}
 `).
 		Example("Deduplication Batch-Wide", `
 Sometimes it's necessary to deduplicate a batch of messages (AKA a window) by a single identifying value. This can be done by introducing a `+"[`branch` processor](/docs/components/processors/branch)"+`, which executes the cache only once on behalf of the batch, in this case with a value make from a field extracted from the first and last messages of the batch:`,
@@ -121,8 +120,7 @@ pipeline:
 
 cache_resources:
   - label: foocache
-    memcached:
-      addresses: [ "TODO:11211" ]
+    memory: {}
 `).
 		Fields(
 			service.NewStringField(cachePFieldResource).

@@ -51,17 +51,13 @@ func genInputSpec() *service.ConfigSpec {
 				Default(1),
 			service.NewAutoRetryNacksToggleField(),
 		).
-		Example("Cron Scheduled Processing", "A common use case for the generate input is to trigger processors on a schedule so that the processors themselves can behave similarly to an input. The following configuration reads rows from a PostgreSQL table every 5 minutes.", `
+		Example("Cron Scheduled Processing", "A common use case for the generate input is to trigger processors on a schedule so that the processors themselves can behave similarly to an input. The following configuration stamps a message with the time every 5 minutes.", `
 input:
   generate:
     interval: '@every 5m'
     mapping: 'root = {}'
   processors:
-    - sql_select:
-        driver: postgres
-        dsn: postgres://foouser:foopass@localhost:5432/testdb?sslmode=disable
-        table: foo
-        columns: [ "*" ]
+    - mapping: 'root.checked_at = now()'
 `).
 		Example("Generate 100 Rows", "The generate input can be used as a convenient way to generate test data. The following example generates 100 rows of structured data by setting an explicit count. The interval field is set to empty, which means data is generated as fast as the downstream components can consume it.", `
 input:

@@ -113,14 +113,12 @@ output:
   broker:
     pattern: fan_out
     outputs:
-      - gcp_bigquery:
-          project: my-project
-          dataset: raw_data
-          table: events
-      - gcp_bigquery:
-          project: my-project
-          dataset: analytics
-          table: events_aggregated
+      - aws_s3:
+          bucket: raw-data
+          path: events/${! uuid_v4() }.json
+      - aws_s3:
+          bucket: analytics
+          path: events_aggregated/${! uuid_v4() }.json
       - file:
           path: /backup/events.jsonl
           codec: lines

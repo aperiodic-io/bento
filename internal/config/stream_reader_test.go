@@ -12,9 +12,7 @@ import (
 	"github.com/warpstreamlabs/bento/internal/config"
 	"github.com/warpstreamlabs/bento/internal/stream"
 
-	_ "github.com/warpstreamlabs/bento/public/components/amqp1"
 	_ "github.com/warpstreamlabs/bento/public/components/pure"
-	_ "github.com/warpstreamlabs/bento/public/components/sql"
 )
 
 func TestStreamsLints(t *testing.T) {
@@ -86,16 +84,11 @@ logger:
 	streamOnePath := filepath.Join(dir, "first.yaml")
 	require.NoError(t, os.WriteFile(streamOnePath, []byte(`
 input:
-  amqp_1:
+  lint_test_input:
     url: amqp://guest:guest@localhost:5672/
-    source_address: foo
 
 output:
-  sql:
-    driver: postgres
-    data_source_name: postgresql://user:password@postgres:5432/db?sslmode=disable
-    query: INSERT INTO table (foo, bar, baz) VALUES (?, ?, ?);
-    args_mapping: root = [ "neo", "cypher", "trinity" ]
+  lint_test_output: {}
 `), 0o644))
 
 	opts := []config.OptFunc{config.OptSetStreamPaths(streamOnePath), config.OptSetLintConfigWarnDeprecated()}
@@ -114,7 +107,7 @@ output:
 
 	require.Len(t, lintWarns, 2)
 	assert.Contains(t, lintWarns[0], "field url is deprecated")
-	assert.Contains(t, lintWarns[1], "component sql is deprecated")
+	assert.Contains(t, lintWarns[1], "component lint_test_output is deprecated")
 }
 
 func TestStreamsDirectoryWalk(t *testing.T) {

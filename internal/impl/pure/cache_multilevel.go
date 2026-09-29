@@ -38,9 +38,8 @@ cache_resources:
       default_ttl: 60s
 
   - label: cold
-    memcached:
-      addresses: [ TODO:11211 ]
-      default_ttl: 60s
+    memory:
+      default_ttl: 24h
 `)
 	return spec
 }

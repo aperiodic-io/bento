@@ -10,7 +10,6 @@ import (
 
 	"github.com/warpstreamlabs/bento/public/service"
 
-	_ "github.com/warpstreamlabs/bento/internal/impl/lang"
 	_ "github.com/warpstreamlabs/bento/public/components/pure"
 )
 
@@ -49,9 +48,9 @@ input:
     mapping: |
       meta = {"foo":"foo value","bar":"bar value"}
       root.id = uuid_v4()
-      root.name = fake("name")
-      root.mobile = fake("phone_number")
-      root.site = fake("url")
+      root.name = uuid_v4()
+      root.mobile = uuid_v4()
+      root.site = uuid_v4()
 
 pipeline:
   processors:
@@ -79,11 +78,11 @@ input:
     mapping: |
       meta = {"foo":"foo value","bar":"bar value"}
       root.id = uuid_v4()
-      root.name = fake("name")
-      root.mobile = fake("phone_number")
-      root.site = fake("url")
-      root.email = fake("email")
-      root.friends = range(0, (random_int() %% 10) + 1).map_each(fake("name"))
+      root.name = uuid_v4()
+      root.mobile = uuid_v4()
+      root.site = uuid_v4()
+      root.email = uuid_v4()
+      root.friends = range(0, (random_int() %% 10) + 1).map_each(uuid_v4())
 
 pipeline:
   processors:
@@ -109,11 +108,11 @@ input:
     mapping: |
       meta = {"foo":"foo value","bar":"bar value"}
       root.id = uuid_v4()
-      root.name = fake("name")
-      root.mobile = fake("phone_number")
-      root.site = fake("url")
-      root.email = fake("email")
-      root.friends = range(0, (random_int() %% 10) + 1).map_each(fake("name"))
+      root.name = uuid_v4()
+      root.mobile = uuid_v4()
+      root.site = uuid_v4()
+      root.email = uuid_v4()
+      root.friends = range(0, (random_int() %% 10) + 1).map_each(uuid_v4())
 
 pipeline:
   processors:
@@ -138,11 +137,11 @@ input:
     mapping: |
       meta = {"foo":"foo value","bar":"bar value"}
       root.id = uuid_v4()
-      root.name = fake("name")
-      root.mobile = fake("phone_number")
-      root.site = fake("url")
-      root.email = fake("email")
-      root.friends = range(0, (random_int() %% 10) + 1).map_each(fake("name"))
+      root.name = uuid_v4()
+      root.mobile = uuid_v4()
+      root.site = uuid_v4()
+      root.email = uuid_v4()
+      root.friends = range(0, (random_int() %% 10) + 1).map_each(uuid_v4())
   processors:
     - mapping: |
         root = this
@@ -166,11 +165,11 @@ input:
     mapping: |
       meta = {"foo":"foo value","bar":"bar value"}
       root.id = uuid_v4()
-      root.name = fake("name")
-      root.mobile = fake("phone_number")
-      root.site = fake("url")
-      root.email = fake("email")
-      root.friends = range(0, (random_int() %% 10) + 1).map_each(fake("name"))
+      root.name = uuid_v4()
+      root.mobile = uuid_v4()
+      root.site = uuid_v4()
+      root.email = uuid_v4()
+      root.friends = range(0, (random_int() %% 10) + 1).map_each(uuid_v4())
   processors:
     - mutation: |
         root.loud_name = this.name.uppercase()
@@ -197,11 +196,11 @@ input:
     mapping: |
       meta = {"foo":"foo value","bar":"bar value"}
       root.id = uuid_v4()
-      root.name = fake("name")
-      root.mobile = fake("phone_number")
-      root.site = fake("url")
-      root.email = fake("email")
-      root.friends = range(0, (random_int() %% 10) + 1).map_each(fake("name"))
+      root.name = uuid_v4()
+      root.mobile = uuid_v4()
+      root.site = uuid_v4()
+      root.email = uuid_v4()
+      root.friends = range(0, (random_int() %% 10) + 1).map_each(uuid_v4())
 
 pipeline:
   processors:
@@ -289,13 +288,13 @@ input:
     mapping: |
       meta = {"foo":"foo value","bar":"bar value"}
       root.id = uuid_v4()
-      root.name = fake("name")
-      root.mobile = fake("phone_number")
-      root.site = fake("url")
-      root.email = fake("email")
-      root.friends = range(0, (random_int() %% 10) + 1).map_each(fake("name"))
+      root.name = uuid_v4()
+      root.mobile = uuid_v4()
+      root.site = uuid_v4()
+      root.email = uuid_v4()
+      root.friends = range(0, (random_int() %% 10) + 1).map_each(uuid_v4())
       root.meows = range(0, (random_int() %% 10) + 1).fold({}, item -> item.tally.merge({
-        nanoid(): fake("name")
+        nanoid(): uuid_v4()
       }))
 
 output:
@@ -315,17 +314,17 @@ input:
     mapping: |
       meta = {"foo":"foo value","bar":"bar value"}
       root.id = uuid_v4()
-      root.name = fake("name")
-      root.mobile = fake("phone_number")
-      root.site = fake("url")
-      root.email = fake("email")
-      root.friends = range(0, (random_int() %% 10) + 1).map_each(fake("name"))
+      root.name = uuid_v4()
+      root.mobile = uuid_v4()
+      root.site = uuid_v4()
+      root.email = uuid_v4()
+      root.friends = range(0, (random_int() %% 10) + 1).map_each(uuid_v4())
       root.meows = {
-        nanoid(): fake("name"),
-        nanoid(): fake("name"),
-        nanoid(): fake("name"),
-        nanoid(): fake("name"),
-        nanoid(): fake("name"),
+        nanoid(): uuid_v4(),
+        nanoid(): uuid_v4(),
+        nanoid(): uuid_v4(),
+        nanoid(): uuid_v4(),
+        nanoid(): uuid_v4(),
       }
 
 pipeline:
@@ -353,8 +352,8 @@ input:
     mapping: |
       meta = {"foo":"foo value","bar":(random_int()%%10).string()}
       root.id = uuid_v4()
-      root.name = fake("name")
-      root.email = fake("email")
+      root.name = uuid_v4()
+      root.email = uuid_v4()
 
 pipeline:
   processors:
@@ -392,8 +391,8 @@ input:
     mapping: |
       meta = {"foo":"foo value","bar":(random_int()%%10).string()}
       root.id = uuid_v4()
-      root.name = fake("name")
-      root.email = fake("email")
+      root.name = uuid_v4()
+      root.email = uuid_v4()
 
 pipeline:
   processors:

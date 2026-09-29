@@ -1,4 +1,4 @@
-.PHONY: all serverless deps docker docker-cgo clean docs generate protos test test-race test-integration fmt lint install deploy-docs playground
+.PHONY: all deps docker docker-cgo clean docs generate protos test test-race test-integration fmt lint install deploy-docs playground
 TAGS ?=
 
 GOMAXPROCS         ?= 1
@@ -7,7 +7,6 @@ WEBSITE_DIR        ?= ./website
 DEST_DIR           ?= ./target
 PATHINSTBIN        = $(DEST_DIR)/bin
 PATHINSTTOOLS      = $(DEST_DIR)/tools
-PATHINSTSERVERLESS = $(DEST_DIR)/serverless
 PATHINSTDOCKER     = $(DEST_DIR)/docker
 DOCKER_IMAGE       ?= ghcr.io/warpstreamlabs/bento
 
@@ -58,16 +57,6 @@ $(PATHINSTTOOLS)/%: $(SOURCE_FILES)
 
 $(TOOLS): %: $(PATHINSTTOOLS)/%
 
-SERVERLESS = bento-lambda
-serverless: $(SERVERLESS)
-
-$(PATHINSTSERVERLESS)/%: $(SOURCE_FILES)
-	@CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-		go build $(GO_FLAGS) -tags "$(TAGS)" -ldflags "$(LD_FLAGS) $(VER_FLAGS)" -o $@ ./cmd/serverless/$*
-	@zip -m -j $@.zip $@
-
-$(SERVERLESS): %: $(PATHINSTSERVERLESS)/%
-
 docker-tags:
 	@echo "latest,$(VER_CUT),$(VER_MAJOR).$(VER_MINOR),$(VER_MAJOR)" > .tags
 
@@ -110,7 +99,6 @@ clean:
 	rm -rf $(PATHINSTBIN)
 	rm -rf $(DEST_DIR)/dist
 	rm -rf $(DEST_DIR)/tools
-	rm -rf $(DEST_DIR)/serverless
 	rm -rf $(PATHINSTDOCKER)
 	rm -rf $(WEBSITE_DIR)/static/playground
 

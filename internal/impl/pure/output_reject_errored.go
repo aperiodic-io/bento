@@ -29,9 +29,10 @@ The routing of messages rejected by this output depends on the type of input it 
 The most straight forward use case for this output type is to nack messages that have failed their processing steps. In this example our mapping might fail, in which case the messages that failed are rejected and will be nacked by our input:`,
 				`
 input:
-  nats_jetstream:
-    urls: [ nats://127.0.0.1:4222 ]
-    subject: foos.pending
+  kafka_franz:
+    seed_brokers: [ localhost:9092 ]
+    topics: [ foos_pending ]
+    consumer_group: foos
 
 pipeline:
   processors:
@@ -39,9 +40,9 @@ pipeline:
 
 output:
   reject_errored:
-    nats_jetstream:
-      urls: [ nats://127.0.0.1:4222 ]
-      subject: foos.processed
+    kafka_franz:
+      seed_brokers: [ localhost:9092 ]
+      topic: foos_processed
 `,
 			).
 			Example(
