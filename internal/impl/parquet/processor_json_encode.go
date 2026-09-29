@@ -537,7 +537,8 @@ func (e *jsonParquetEncoder) value(a *jpeArena, c *jpeColumn, r *jpeRow, i int) 
 	switch c.kind {
 	case jpeUTF8:
 		if v != nil {
-			pv = parquet.ByteArrayValue(a.copyString(value.IToString(v)))
+			s := value.IToString(v) // made for this value alone
+			pv = parquet.ByteArrayValue(unsafe.Slice(unsafe.StringData(s), len(s)))
 		} else {
 			pv = parquet.ByteArrayValue(a.copy(r.content(i)))
 		}
@@ -665,14 +666,6 @@ func (a *jpeArena) row(n int) parquet.Row {
 // copy returns a copy of b. A value larger than a quarter chunk is copied on
 // its own, so that it does not waste the rest of one.
 func (a *jpeArena) copy(b []byte) []byte {
-	return jpeArenaCopy(a, b)
-}
-
-func (a *jpeArena) copyString(s string) []byte {
-	return jpeArenaCopy(a, s)
-}
-
-func jpeArenaCopy[T string | []byte](a *jpeArena, b T) []byte {
 	if len(b) > jpeArenaBytes/4 {
 		// append, since []byte(b) of a []byte is b itself, not a copy
 		return append([]byte(nil), b...)
@@ -819,7 +812,10 @@ func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.Mes
 		for i := range e.columns {
 			c := &e.columns[i]
 			if c.interp != nil {
-				values[c.leaf] = parquet.ByteArrayValue(g.arena.copyString(interpolated[i])).Level(0, c.definitionLevel(), c.leaf)
+				// The string's own bytes, which no one writes to: a cached one
+				// is shared by the batch's rows, and the writer copies values.
+				s := interpolated[i]
+				values[c.leaf] = parquet.ByteArrayValue(unsafe.Slice(unsafe.StringData(s), len(s))).Level(0, c.definitionLevel(), c.leaf)
 				continue
 			}
 			if values[c.leaf], err = e.value(&g.arena, c, row, i); err != nil {
