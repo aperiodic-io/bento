@@ -465,32 +465,31 @@ func jpeString(v any) string {
 	return value.IToString(v)
 }
 
-// partitionPath formats the partition path of a row, as the Bloblang
-// "...".format(this.a, ...) and (this.t / divisor).ts_format(layout, "UTC")
-// it replaces would.
-func (e *jsonParquetEncoder) partitionPath(b *strings.Builder, r *jpeRow, interpolated []string) error {
-	b.Reset()
+// appendPartitionPath appends the partition path of a row to b, as the
+// Bloblang "...".format(this.a, ...) and
+// (this.t / divisor).ts_format(layout, "UTC") it replaces would.
+func (e *jsonParquetEncoder) appendPartitionPath(b []byte, r *jpeRow, interpolated []string) ([]byte, error) {
 	for _, p := range e.partition {
 		switch {
 		case p.column < 0:
-			b.WriteString(p.literal)
+			b = append(b, p.literal...)
 		case e.columns[p.column].interp != nil:
-			b.WriteString(interpolated[p.column])
+			b = append(b, interpolated[p.column]...)
 		case p.layout == "":
-			fmt.Fprintf(b, "%s", r.values[p.column])
+			b = fmt.Appendf(b, "%s", r.values[p.column])
 		default:
 			n, err := value.IGetNumber(r.values[p.column])
 			if err != nil {
-				return fmt.Errorf("partition: %v: %w", e.columns[p.column].name, err)
+				return b, fmt.Errorf("partition: %v: %w", e.columns[p.column].name, err)
 			}
 			t, err := value.IGetTimestamp(n / e.divisor)
 			if err != nil {
-				return fmt.Errorf("partition: %v: %w", e.columns[p.column].name, err)
+				return b, fmt.Errorf("partition: %v: %w", e.columns[p.column].name, err)
 			}
-			b.WriteString(t.UTC().Format(p.layout))
+			b = t.UTC().AppendFormat(b, p.layout)
 		}
 	}
-	return nil
+	return b, nil
 }
 
 //------------------------------------------------------------------------------
@@ -515,7 +514,7 @@ func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.Mes
 		dec          = jsontext.NewDecoder(&src, jpeDecodeOptions...)
 		row          = &jpeRow{present: make([]bool, len(e.columns)), values: make([]any, len(e.columns))}
 		interpolated = make([]string, len(e.columns))
-		key          strings.Builder
+		key          []byte
 		dropped      int
 	)
 	drop := func(err error) {
@@ -553,18 +552,18 @@ func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.Mes
 			drop(err)
 			continue
 		}
-		k := ""
 		if e.partition != nil {
-			if err := e.partitionPath(&key, row, interpolated); err != nil {
+			if key, err = e.appendPartitionPath(key[:0], row, interpolated); err != nil {
 				drop(err)
 				continue
 			}
-			k = key.String()
 		}
-		if current == nil || current.key != k {
-			if current = byKey[k]; current == nil {
-				current = &jpeGroup{first: msg, key: k}
-				byKey[k] = current
+		// The key is only copied into a string for a new partition: the
+		// comparison and lookup of string(key) do not allocate.
+		if current == nil || current.key != string(key) {
+			if current = byKey[string(key)]; current == nil {
+				current = &jpeGroup{first: msg, key: string(key)}
+				byKey[current.key] = current
 				groups = append(groups, current)
 			}
 		}
@@ -585,7 +584,7 @@ func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.Mes
 	out := make(service.MessageBatch, 0, len(groups))
 	for _, g := range groups {
 		var buf bytes.Buffer
-		if err := jpeEncode(parquet.NewGenericWriter[any](&buf, e.schema, e.codec), g.rows); err != nil {
+		if err := jpeEncode(parquet.NewGenericWriter[any](&buf, e.schema, e.codec, jpeNoWriteBuffer), g.rows); err != nil {
 			return nil, err
 		}
 		g.rows = nil
@@ -613,6 +612,10 @@ func (e *jsonParquetEncoder) interpolate(msg *service.Message, interpolated []st
 	}
 	return nil
 }
+
+// jpeNoWriteBuffer drops the writer's buffering of its output, which is a
+// bytes.Buffer already: 32 KiB a file saved, the same bytes written.
+var jpeNoWriteBuffer = parquet.WriteBufferSize(0)
 
 // jpeEncode writes rows as one whole file.
 func jpeEncode(w *parquet.GenericWriter[any], rows []parquet.Row) (err error) {
