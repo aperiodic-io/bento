@@ -148,6 +148,13 @@ func (c *jpeColumn) definitionLevel() int {
 	return 0
 }
 
+// jpeWriterPool holds writers between files: a sync.Pool, which lets the GC
+// empty it, and in tests a pool that keeps what it is given.
+type jpeWriterPool interface {
+	Get() any
+	Put(x any)
+}
+
 // jpePart is one piece of a partition path: literal text, or a column formatted
 // as Bloblang's format prints it (layout empty) or as a time (layout set).
 type jpePart struct {
@@ -172,8 +179,8 @@ type jsonParquetEncoder struct {
 	divisor       float64
 	partitionMeta string
 
-	utf8Leaves []int     // the Parquet leaves of the UTF8 columns
-	writers    sync.Pool // of *parquet.GenericWriter[any], reset for each file
+	utf8Leaves []int         // the Parquet leaves of the UTF8 columns
+	writers    jpeWriterPool // of *parquet.GenericWriter[any], reset for each file
 
 	// newWriters, for tests, gives every file a new writer, and reused counts
 	// the files that were given a reset one
@@ -187,6 +194,7 @@ func newJSONParquetEncoder(conf *service.ParsedConfig, mgr *service.Resources) (
 		mDropped: mgr.Metrics().NewCounter("json_parquet_encode_dropped"),
 		mFiles:   mgr.Metrics().NewCounter("json_parquet_encode_files"),
 		byName:   map[string]int{},
+		writers:  &sync.Pool{},
 		byQuoted: map[string]int{},
 	}
 

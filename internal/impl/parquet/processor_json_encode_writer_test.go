@@ -5,8 +5,6 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
-	"runtime"
-	"runtime/debug"
 	"strings"
 	"testing"
 
@@ -122,14 +120,11 @@ columns:
   - { name: exchange, value: '${! @topic }', cache_by: [ topic ] }
 %v
 `, encoding, codec, partition)
-					// No GC, which would empty the pool between batches, and one
-					// P, whose private slot a writer is put in: every file but
-					// the first can be given a reset writer.
-					defer debug.SetGCPercent(debug.SetGCPercent(-1))
-					defer runtime.GC()
-					defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
 					reused, err := newTestJSONEncoder(t, conf)
 					require.NoError(t, err)
+					// A pool the GC does not empty, and that has no slot per P:
+					// every file but the first can be given a reset writer.
+					reused.writers = &keepingPool{}
 					fresh, err := newTestJSONEncoder(t, conf)
 					require.NoError(t, err)
 					fresh.newWriters = true
@@ -161,4 +156,22 @@ columns:
 			}
 		}
 	}
+}
+
+// keepingPool is a jpeWriterPool that keeps every writer it is given.
+type keepingPool struct {
+	writers []any
+}
+
+func (p *keepingPool) Get() any {
+	if len(p.writers) == 0 {
+		return nil
+	}
+	w := p.writers[len(p.writers)-1]
+	p.writers = p.writers[:len(p.writers)-1]
+	return w
+}
+
+func (p *keepingPool) Put(w any) {
+	p.writers = append(p.writers, w)
 }
