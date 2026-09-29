@@ -657,7 +657,8 @@ func (a *jpeArena) copyString(s string) []byte {
 
 func jpeArenaCopy[T string | []byte](a *jpeArena, b T) []byte {
 	if len(b) > jpeArenaBytes/4 {
-		return []byte(b)
+		// append, since []byte(b) of a []byte is b itself, not a copy
+		return append([]byte(nil), b...)
 	}
 	if cap(a.bytes)-len(a.bytes) < len(b) {
 		a.nextBytes = min(max(2*a.nextBytes, 1<<10), jpeArenaBytes)

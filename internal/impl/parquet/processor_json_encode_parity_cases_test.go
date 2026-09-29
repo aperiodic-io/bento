@@ -1,6 +1,7 @@
 package parquet_test
 
 import (
+	"bytes"
 	"fmt"
 	"math/rand/v2"
 	"slices"
@@ -127,6 +128,24 @@ func TestJSONParquetParityMessages(t *testing.T) {
 			requireParity(t, archiveSchema, []parityInput{{topic: parityTopic, body: []byte(body)}})
 		})
 	}
+}
+
+func TestJSONParquetParityLongStringsAmongOthers(t *testing.T) {
+	// long strings, of every size around the arena's, in a batch of other
+	// messages and partitions: a value must not share memory that a later
+	// message is parsed into
+	var in []parityInput
+	for i, n := range []int{4095, 4096, 4097, 5000, 16 << 10, 64 << 10, 1 << 20} {
+		long := fmt.Sprintf(`"%s"`, strings.Repeat(string(rune('a'+i)), n))
+		in = append(in,
+			parityInput{topic: parityTopic, body: rowWith("symbol", long)},
+			parityInput{topic: "metric.v1.okx-perps.15s", body: rowWith("symbol", `"short"`)},
+			parityInput{topic: parityTopic, body: rowWith("interval", long)},
+			parityInput{topic: parityTopic, body: rowWith("count", `"x"`)}, // dropped
+			parityInput{topic: "metric.v1.top-3.15s", body: rowWith("", "")},
+		)
+	}
+	requireParity(t, archiveSchema, in)
 }
 
 func TestJSONParquetParityMetadata(t *testing.T) {
@@ -296,6 +315,11 @@ func TestJSONParquetParityWithoutPartitionOrNaN(t *testing.T) {
 
 func FuzzJSONParquetParity(f *testing.F) {
 	f.Add(rowWith("", ""), parityTopic)
+	// strings past the arena's, followed by other messages to parse
+	for _, n := range []int{4097, 20 << 10} {
+		long := rowWith("symbol", `"`+strings.Repeat("y", n)+`"`)
+		f.Add(bytes.Join([][]byte{long, rowWith("", ""), rowWith("interval", `"`+strings.Repeat("z", n)+`"`)}, []byte("\n")), parityTopic)
+	}
 	for _, v := range valueVariants {
 		f.Add(rowWith("price", v), parityTopic)
 		f.Add(rowWith("time", v), "metric.v1.okx-perps.1m")
