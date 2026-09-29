@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 	"unsafe"
 
@@ -156,6 +157,9 @@ type jsonParquetEncoder struct {
 	partition     []jpePart
 	divisor       float64
 	partitionMeta string
+
+	utf8Leaves []int     // the Parquet leaves of the UTF8 columns
+	writers    sync.Pool // of *parquet.GenericWriter[any], reset for each file
 }
 
 func newJSONParquetEncoder(conf *service.ParsedConfig, mgr *service.Resources) (*jsonParquetEncoder, error) {
@@ -260,6 +264,9 @@ func newJSONParquetEncoder(conf *service.ParsedConfig, mgr *service.Resources) (
 			return nil, fmt.Errorf("schema column %v has no definition", path[0])
 		}
 		e.columns[i].leaf = leaf
+		if e.columns[i].kind == jpeUTF8 {
+			e.utf8Leaves = append(e.utf8Leaves, leaf)
+		}
 	}
 
 	compressStr, err := conf.FieldString("default_compression")
@@ -691,6 +698,9 @@ type jpeGroup struct {
 	key   string
 	rows  []parquet.Row
 	arena jpeArena
+	// emptyString is set when a UTF8 value of the group is empty, which a reset
+	// writer can write differently from a new one (see ProcessBatch)
+	emptyString bool
 }
 
 func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.MessageBatch) ([]service.MessageBatch, error) {
@@ -761,6 +771,14 @@ func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.Mes
 			drop(err)
 			continue
 		}
+		if !g.emptyString {
+			for _, leaf := range e.utf8Leaves {
+				if v := values[leaf]; !v.IsNull() && len(v.ByteArray()) == 0 {
+					g.emptyString = true
+					break
+				}
+			}
+		}
 		if isNew {
 			byKey[g.key] = g
 			groups = append(groups, g)
@@ -778,14 +796,27 @@ func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.Mes
 	// Files are encoded one at a time, as parquet_encode encodes each group
 	// group_by_value hands it: a writer's column buffers are the bulk of what
 	// encoding holds, so a batch of many partitions must not hold one per file.
-	// Each file takes a new writer, since a reset one does not write the same
-	// bytes as a new one.
+	//
+	// A writer is reset for the next file, and kept for the next batch, rather
+	// than made anew: making one is a third of what a batch of many small files
+	// allocates. A reset writer writes the bytes a new one would, save for one
+	// case: a page whose values are all empty strings, whose bounds a new
+	// writer leaves out (they point into a column buffer that holds nothing)
+	// and a reset one writes as empty (its buffer held the last file's values).
+	// So a file with an empty string takes a new writer.
 	out := make(service.MessageBatch, 0, len(groups))
 	for _, g := range groups {
 		var buf bytes.Buffer
-		if err := jpeEncode(parquet.NewGenericWriter[any](&buf, e.schema, e.codec, jpeNoWriteBuffer), g.rows); err != nil {
+		w, _ := e.writers.Get().(*parquet.GenericWriter[any])
+		if w == nil || g.emptyString {
+			w = parquet.NewGenericWriter[any](&buf, e.schema, e.codec, jpeNoWriteBuffer)
+		} else {
+			w.Reset(&buf)
+		}
+		if err := jpeEncode(w, g.rows); err != nil {
 			return nil, err
 		}
+		e.writers.Put(w)
 		g.rows, g.arena = nil, jpeArena{}
 		m := g.first.Copy()
 		m.SetBytes(buf.Bytes())
