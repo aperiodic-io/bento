@@ -106,7 +106,7 @@ output:
               - { name: close, type: DOUBLE }
               - { name: volume, type: DOUBLE, optional: true }
             columns:
-              - { name: exchange, value: '${! @kafka_topic.split(".").index(2) }' }
+              - { name: exchange, value: '${! @kafka_topic.split(".").index(2) }', cache: true }
             partition:
               path: 'exchange={exchange}/{time|year=2006/month=01/day=02}'
               time_unit: us
@@ -210,6 +210,14 @@ This field supports [interpolation functions](/docs/configuration/interpolation#
 
 
 Type: `string`  
+
+### `columns[].cache`
+
+Evaluate the value once per batch for each distinct combination of the metadata fields it reads, rather than for every message. The value must depend on nothing but those fields: one that reads a message field or the whole of the metadata is rejected, but a function that reads the message without naming a field, such as `content()`, or that differs from call to call, such as `now()`, `uuid_v4()` or `count()`, cannot be told apart and would be evaluated once per batch. A message whose field holds anything but a string is evaluated on its own.
+
+
+Type: `bool`  
+Default: `false`  
 
 ### `nan_for_null`
 

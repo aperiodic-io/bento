@@ -3,6 +3,7 @@ package parquet_test
 import (
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"strings"
 	"testing"
 
@@ -140,6 +141,32 @@ func TestJSONParquetParityMetadata(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			requireParity(t, archiveSchema, []parityInput{{topic: topic, body: body}})
 		})
+	}
+}
+
+func TestJSONParquetParityCachedColumn(t *testing.T) {
+	// the interpolated column evaluated once per topic a batch, over topics
+	// that differ, repeat, and are absent, within one batch and across batches
+	s := archiveSchema
+	s.columns = slices.Clone(s.columns)
+	s.columns[0].cache = true
+	require.NotEmpty(t, s.columns[0].fromMeta)
+	body := rowWith("", "")
+	var in []parityInput
+	for _, topic := range []string{
+		parityTopic, "", "metric.v1.okx-perps.15s", "metric.v1", parityTopic, "a.b.c",
+		"metric.v1..15s", "", "metric.v1.交易所.15s", "metric.v1.okx-perps.15s", parityTopic,
+	} {
+		in = append(in, parityInput{topic: topic, body: body})
+	}
+	requireParity(t, s, in)
+	r := rand.New(rand.NewPCG(5, 6))
+	for range 50 {
+		in := make([]parityInput, 1+r.IntN(400))
+		for j := range in {
+			in[j] = randomRow(r)
+		}
+		requireParity(t, s, in)
 	}
 }
 

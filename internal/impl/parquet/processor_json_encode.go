@@ -3,6 +3,7 @@ package parquet
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"encoding/json/jsontext"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"math"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -17,6 +19,8 @@ import (
 
 	"github.com/parquet-go/parquet-go"
 
+	"github.com/warpstreamlabs/bento/internal/bloblang/field"
+	"github.com/warpstreamlabs/bento/internal/bloblang/query"
 	"github.com/warpstreamlabs/bento/internal/value"
 	"github.com/warpstreamlabs/bento/public/service"
 )
@@ -25,6 +29,7 @@ const (
 	jpeFieldColumns          = "columns"
 	jpeFieldColumnName       = "name"
 	jpeFieldColumnValue      = "value"
+	jpeFieldColumnCache      = "cache"
 	jpeFieldNaNForNull       = "nan_for_null"
 	jpeFieldPartition        = "partition"
 	jpeFieldPartitionPath    = "path"
@@ -55,6 +60,7 @@ When `+"`partition`"+` is set the batch is split into one Parquet file per disti
 		Field(service.NewObjectListField(jpeFieldColumns,
 			service.NewStringField(jpeFieldColumnName).Description("The schema column this sets."),
 			service.NewInterpolatedStringField(jpeFieldColumnValue).Description("The column's value, from the message's metadata. It must not reference the message content."),
+			service.NewBoolField(jpeFieldColumnCache).Description("Evaluate the value once per batch for each distinct combination of the metadata fields it reads, rather than for every message. The value must depend on nothing but those fields: one that reads a message field or the whole of the metadata is rejected, but a function that reads the message without naming a field, such as `content()`, or that differs from call to call, such as `now()`, `uuid_v4()` or `count()`, cannot be told apart and would be evaluated once per batch. A message whose field holds anything but a string is evaluated on its own.").Default(false),
 		).Description("Columns set from an interpolation instead of the message field of their name.").Default([]any{})).
 		Field(service.NewBoolField(jpeFieldNaNForNull).Description("Write a `null` in a required `FLOAT` or `DOUBLE` column as NaN instead of dropping the message.").Default(false)).
 		Field(service.NewObjectField(jpeFieldPartition,
@@ -89,7 +95,7 @@ output:
               - { name: close, type: DOUBLE }
               - { name: volume, type: DOUBLE, optional: true }
             columns:
-              - { name: exchange, value: '${! @kafka_topic.split(".").index(2) }' }
+              - { name: exchange, value: '${! @kafka_topic.split(".").index(2) }', cache: true }
             partition:
               path: 'exchange={exchange}/{time|year=2006/month=01/day=02}'
               time_unit: us
@@ -124,6 +130,9 @@ type jpeColumn struct {
 	optional bool
 	leaf     int                         // index of the Parquet leaf column
 	interp   *service.InterpolatedString // set when the column comes from metadata
+	cache    bool                        // interp is evaluated once per batch per value of cacheKeys
+	// cacheKeys are the metadata fields interp reads
+	cacheKeys []string
 }
 
 // jpePart is one piece of a partition path: literal text, or a column formatted
@@ -211,6 +220,14 @@ func newJSONParquetEncoder(conf *service.ParsedConfig, mgr *service.Resources) (
 		}
 		if e.columns[i].interp, err = o.FieldInterpolatedString(jpeFieldColumnValue); err != nil {
 			return nil, err
+		}
+		if e.columns[i].cache, err = o.FieldBool(jpeFieldColumnCache); err != nil {
+			return nil, err
+		}
+		if e.columns[i].cache {
+			if e.columns[i].cacheKeys, err = jpeMetadataTargets(e.columns[i].interp); err != nil {
+				return nil, fmt.Errorf("columns: '%v': %w", name, err)
+			}
 		}
 	}
 	if e.nanNull, err = conf.FieldBool(jpeFieldNaNForNull); err != nil {
@@ -681,15 +698,16 @@ func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.Mes
 		return nil, nil
 	}
 	var (
-		groups       []*jpeGroup
-		byKey        = map[string]*jpeGroup{}
-		current      *jpeGroup
-		src          bytes.Reader
-		dec          = jsontext.NewDecoder(&src, jpeDecodeOptions...)
-		row          = newJPERow(len(e.columns))
-		interpolated = make([]string, len(e.columns))
-		key          []byte
-		dropped      int
+		groups        []*jpeGroup
+		byKey         = map[string]*jpeGroup{}
+		current       *jpeGroup
+		src           bytes.Reader
+		dec           = jsontext.NewDecoder(&src, jpeDecodeOptions...)
+		row           = newJPERow(len(e.columns))
+		interpolated  = make([]string, len(e.columns))
+		interpolation = e.newInterpolation()
+		key           []byte
+		dropped       int
 	)
 	drop := func(err error) {
 		dropped++
@@ -704,7 +722,7 @@ func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.Mes
 			err = e.parse(dec, &src, raw, row)
 		}
 		if err == nil {
-			err = e.interpolate(msg, interpolated)
+			err = e.interpolate(interpolation, msg, interpolated)
 		}
 		if err != nil {
 			drop(err)
@@ -779,19 +797,91 @@ func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.Mes
 	return []service.MessageBatch{out}, nil
 }
 
+// jpeMetadataTargets returns the metadata fields an interpolation reads, and
+// fails if it reads anything else: the message, a variable, or the whole of
+// the metadata.
+func jpeMetadataTargets(interp *service.InterpolatedString) ([]string, error) {
+	uw, ok := interp.XUnwrapper().(interface{ Unwrap() *field.Expression })
+	if !ok {
+		return nil, errors.New("cache: the value's expression cannot be inspected")
+	}
+	var keys []string
+	for _, t := range uw.Unwrap().QueryTargets(query.TargetsContext{}) {
+		if t.Type != query.TargetMetadata || len(t.Path) == 0 {
+			return nil, errors.New("cache: the value must read nothing but named metadata fields")
+		}
+		if !slices.Contains(keys, t.Path[0]) {
+			keys = append(keys, t.Path[0])
+		}
+	}
+	return keys, nil
+}
+
+// jpeInterpolation resolves the interpolated columns of a batch's messages,
+// the cached ones once per distinct combination of the metadata they read.
+type jpeInterpolation struct {
+	cache []map[string]string // by column, for the cached ones
+	key   []byte
+}
+
+func (e *jsonParquetEncoder) newInterpolation() *jpeInterpolation {
+	in := &jpeInterpolation{cache: make([]map[string]string, len(e.columns))}
+	for i, c := range e.columns {
+		if c.cache {
+			in.cache[i] = map[string]string{}
+		}
+	}
+	return in
+}
+
 // interpolate resolves the interpolated columns of a message.
-func (e *jsonParquetEncoder) interpolate(msg *service.Message, interpolated []string) error {
+func (e *jsonParquetEncoder) interpolate(in *jpeInterpolation, msg *service.Message, interpolated []string) error {
 	for i, c := range e.columns {
 		if c.interp == nil {
 			continue
+		}
+		cacheable := false
+		if c.cache {
+			in.key, cacheable = jpeCacheKey(in.key[:0], msg, c.cacheKeys)
+			if cacheable {
+				if s, ok := in.cache[i][string(in.key)]; ok {
+					interpolated[i] = s
+					continue
+				}
+			}
 		}
 		s, err := c.interp.TryString(msg)
 		if err != nil {
 			return fmt.Errorf("%v: %w", c.name, err)
 		}
+		if cacheable {
+			in.cache[i][string(in.key)] = s
+		}
 		interpolated[i] = s
 	}
 	return nil
+}
+
+// jpeCacheKey appends to b the values of the metadata fields keys, each marked
+// absent or given with its length. It reports false, and the message is not
+// cached, when a field holds anything but a string, since a value of another
+// type could print the same as a string yet read differently.
+func jpeCacheKey(b []byte, msg *service.Message, keys []string) ([]byte, bool) {
+	for _, k := range keys {
+		v, ok := msg.MetaGetMut(k)
+		if !ok {
+			b = append(b, 0)
+			continue
+		}
+		s, isString := v.(string)
+		if !isString {
+			return b, false
+		}
+		b = append(b, 1)
+		b = binary.AppendUvarint(b, uint64(len(s)))
+		b = append(b, s...)
+	}
+	return b, true
 }
 
 // jpeNoWriteBuffer drops the writer's buffering of its output, which is a

@@ -3,6 +3,7 @@ package parquet
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"math"
 	"testing"
 
@@ -24,20 +25,23 @@ func TestJSONParquetEncodeRejectsWhatItCannotWrite(t *testing.T) {
 	// A config json_parquet_encode would write differently from parquet_encode,
 	// or not at all, must fail at start rather than on the first batch.
 	for name, conf := range map[string]string{
-		"no columns":           `schema: []`,
-		"nested column":        `schema: [ { name: a, type: STRUCT, fields: [ { name: b, type: UTF8 } ] } ]`,
-		"list column":          `schema: [ { name: a, type: LIST, fields: [ { name: element, type: UTF8 } ] } ]`,
-		"unsupported type":     `schema: [ { name: a, type: BOOLEAN } ]`,
-		"byte array":           `schema: [ { name: a, type: BYTE_ARRAY } ]`,
-		"repeated":             `schema: [ { name: a, type: INT64, repeated: true } ]`,
-		"duplicate column":     `schema: [ { name: a, type: INT64 }, { name: a, type: UTF8 } ]`,
-		"unknown override":     "schema: [ { name: a, type: UTF8 } ]\ncolumns: [ { name: b, value: x } ]",
-		"override not UTF8":    "schema: [ { name: a, type: INT64 } ]\ncolumns: [ { name: a, value: '1' } ]",
-		"unknown placeholder":  "schema: [ { name: a, type: UTF8 } ]\npartition: { path: 'x={b}' }",
-		"unclosed placeholder": "schema: [ { name: a, type: UTF8 } ]\npartition: { path: 'x={a' }",
-		"empty time layout":    "schema: [ { name: a, type: INT64 } ]\npartition: { path: 'x={a|}' }",
-		"time of interpolated": "schema: [ { name: a, type: UTF8 } ]\ncolumns: [ { name: a, value: x } ]\npartition: { path: '{a|2006}' }",
-		"unknown time unit":    "schema: [ { name: a, type: INT64 } ]\npartition: { path: '{a|2006}', time_unit: days }",
+		"no columns":              `schema: []`,
+		"nested column":           `schema: [ { name: a, type: STRUCT, fields: [ { name: b, type: UTF8 } ] } ]`,
+		"list column":             `schema: [ { name: a, type: LIST, fields: [ { name: element, type: UTF8 } ] } ]`,
+		"unsupported type":        `schema: [ { name: a, type: BOOLEAN } ]`,
+		"byte array":              `schema: [ { name: a, type: BYTE_ARRAY } ]`,
+		"repeated":                `schema: [ { name: a, type: INT64, repeated: true } ]`,
+		"duplicate column":        `schema: [ { name: a, type: INT64 }, { name: a, type: UTF8 } ]`,
+		"unknown override":        "schema: [ { name: a, type: UTF8 } ]\ncolumns: [ { name: b, value: x } ]",
+		"override not UTF8":       "schema: [ { name: a, type: INT64 } ]\ncolumns: [ { name: a, value: '1' } ]",
+		"unknown placeholder":     "schema: [ { name: a, type: UTF8 } ]\npartition: { path: 'x={b}' }",
+		"unclosed placeholder":    "schema: [ { name: a, type: UTF8 } ]\npartition: { path: 'x={a' }",
+		"empty time layout":       "schema: [ { name: a, type: INT64 } ]\npartition: { path: 'x={a|}' }",
+		"time of interpolated":    "schema: [ { name: a, type: UTF8 } ]\ncolumns: [ { name: a, value: x } ]\npartition: { path: '{a|2006}' }",
+		"unknown time unit":       "schema: [ { name: a, type: INT64 } ]\npartition: { path: '{a|2006}', time_unit: days }",
+		"cache of a field":        "schema: [ { name: a, type: UTF8 } ]\ncolumns: [ { name: a, value: '${! this.b }', cache: true } ]",
+		"cache of all metadata":   "schema: [ { name: a, type: UTF8 } ]\ncolumns: [ { name: a, value: '${! @ }', cache: true } ]",
+		"cache of meta and field": "schema: [ { name: a, type: UTF8 } ]\ncolumns: [ { name: a, value: '${! @t }-${! this.b }', cache: true } ]",
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := newTestJSONEncoder(t, conf)
@@ -176,4 +180,59 @@ func TestJSONParquetEncodeOptionalStringIsNull(t *testing.T) {
 	assert.True(t, rows[1][0].IsNull())
 	assert.Equal(t, float32(2), rows[1][1].Float())
 	assert.False(t, math.IsNaN(float64(rows[1][1].Float())))
+}
+
+func TestJSONParquetEncodeCachedColumn(t *testing.T) {
+	// count() reads no metadata, so a cached value holding it shows how often
+	// the value is evaluated: once a batch for each topic, rather than for each
+	// message.
+	values := func(cache bool) []string {
+		e, err := newTestJSONEncoder(t, fmt.Sprintf(`
+schema: [ { name: a, type: UTF8 }, { name: n, type: INT64 } ]
+columns: [ { name: a, value: '${! @topic }-${! count("jpe_cached_%v") }', cache: %v } ]
+`, cache, cache))
+		require.NoError(t, err)
+		var got []string
+		for range 2 {
+			var batch service.MessageBatch
+			for _, topic := range []string{"x", "x", "y", "x"} {
+				m := service.NewMessage([]byte(`{"n":1}`))
+				m.MetaSetMut("topic", topic)
+				batch = append(batch, m)
+			}
+			out, err := e.ProcessBatch(context.Background(), batch)
+			require.NoError(t, err)
+			data, err := out[0][0].AsBytes()
+			require.NoError(t, err)
+			for _, row := range readRows(t, data) {
+				got = append(got, string(row[0].ByteArray()))
+			}
+		}
+		return got
+	}
+	assert.Equal(t, []string{"x-1", "x-2", "y-3", "x-4", "x-5", "x-6", "y-7", "x-8"}, values(false))
+	assert.Equal(t, []string{"x-1", "x-1", "y-2", "x-1", "x-3", "x-3", "y-4", "x-3"}, values(true))
+
+	// a topic that is not a string is not cached, since it could print as a
+	// string does yet read differently
+	e, err := newTestJSONEncoder(t, `
+schema: [ { name: a, type: UTF8 }, { name: n, type: INT64 } ]
+columns: [ { name: a, value: '${! @topic }-${! count("jpe_cached_typed") }', cache: true } ]
+`)
+	require.NoError(t, err)
+	var batch service.MessageBatch
+	for _, topic := range []any{"1", 1, 1} {
+		m := service.NewMessage([]byte(`{"n":1}`))
+		m.MetaSetMut("topic", topic)
+		batch = append(batch, m)
+	}
+	out, err := e.ProcessBatch(context.Background(), batch)
+	require.NoError(t, err)
+	data, err := out[0][0].AsBytes()
+	require.NoError(t, err)
+	var got []string
+	for _, row := range readRows(t, data) {
+		got = append(got, string(row[0].ByteArray()))
+	}
+	assert.Equal(t, []string{"1-1", "1-2", "1-3"}, got)
 }

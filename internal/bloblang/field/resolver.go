@@ -44,6 +44,11 @@ func NewQueryResolver(fn query.Function) *QueryResolver {
 	return &QueryResolver{fn}
 }
 
+// QueryTargets returns what the query reads.
+func (q QueryResolver) QueryTargets(ctx query.TargetsContext) (query.TargetsContext, []query.TargetPath) {
+	return q.fn.QueryTargets(ctx)
+}
+
 // ResolveString returns a string.
 func (q QueryResolver) ResolveString(index int, msg Message, escaped bool) (string, error) {
 	if msg == nil {

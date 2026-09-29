@@ -34,6 +34,7 @@ type parityColumn struct {
 	typ      string
 	optional bool
 	fromMeta string // the Bloblang of an interpolated column, "" to read the field
+	cache    bool   // json_parquet_encode caches fromMeta
 }
 
 type paritySchema struct {
@@ -145,7 +146,7 @@ func (s paritySchema) newProcessors() string {
 	b.WriteString("        columns:\n")
 	for _, c := range s.columns {
 		if c.fromMeta != "" {
-			fmt.Fprintf(&b, "          - { name: %s, value: '${! %s }' }\n", c.name, c.fromMeta)
+			fmt.Fprintf(&b, "          - { name: %s, value: '${! %s }', cache: %v }\n", c.name, c.fromMeta, c.cache)
 		}
 	}
 	if s.partition != "" {

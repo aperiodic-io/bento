@@ -5,6 +5,7 @@ import (
 	"math/rand/v2"
 	"runtime"
 	"runtime/metrics"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -88,10 +89,19 @@ func BenchmarkJSONParquetHeldBatch(b *testing.B) {
 	})
 }
 
-// fewPartitions is archiveSchema partitioned as the archiver's example is, by
-// exchange and day: a dozen files a batch rather than hundreds.
-var fewPartitions = func() paritySchema {
+// cachedArchiveSchema is archiveSchema with its interpolated column cached, as
+// an archiver would configure it.
+var cachedArchiveSchema = func() paritySchema {
 	s := archiveSchema
+	s.columns = slices.Clone(s.columns)
+	s.columns[0].cache = true
+	return s
+}()
+
+// fewPartitions is cachedArchiveSchema partitioned as the archiver's example
+// is, by exchange and day: a couple of dozen files a batch rather than hundreds.
+var fewPartitions = func() paritySchema {
+	s := cachedArchiveSchema
 	s.partition = "exchange={exchange}/{time|year=2006/month=01/day=02}"
 	s.legacyPartition = `"exchange=%s/%s".format(root.exchange, (this.time / 1000000).ts_format("year=2006/month=01/day=02", "UTC"))`
 	return s
@@ -109,7 +119,7 @@ func BenchmarkJSONParquetEncode(b *testing.B) {
 	for _, partitions := range []struct {
 		name   string
 		schema paritySchema
-	}{{"many_files", archiveSchema}, {"few_files", fewPartitions}} {
+	}{{"many_files", cachedArchiveSchema}, {"few_files", fewPartitions}} {
 		p := pairFor(b, partitions.schema)
 		for name, s := range map[string]*parityStream{"legacy": p.legacy, "json_parquet_encode": p.next} {
 			b.Run(partitions.name+"/"+name, func(b *testing.B) {
