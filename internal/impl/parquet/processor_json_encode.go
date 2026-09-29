@@ -464,7 +464,7 @@ func jpeUnsafeString(b []byte) string {
 // strconv call the coercion would make of it (json.Number's Int64 and Float64
 // parse in base 10, a string's integer in any base Go literals use); anything
 // else is handed to the coercion itself.
-func (e *jsonParquetEncoder) value(c *jpeColumn, r *jpeRow, i int) (parquet.Value, error) {
+func (e *jsonParquetEncoder) value(a *jpeArena, c *jpeColumn, r *jpeRow, i int) (parquet.Value, error) {
 	def := 0
 	if c.optional {
 		def = 1
@@ -493,9 +493,9 @@ func (e *jsonParquetEncoder) value(c *jpeColumn, r *jpeRow, i int) (parquet.Valu
 	switch c.kind {
 	case jpeUTF8:
 		if v != nil {
-			pv = parquet.ByteArrayValue([]byte(value.IToString(v)))
+			pv = parquet.ByteArrayValue(a.copyString(value.IToString(v)))
 		} else {
-			pv = parquet.ByteArrayValue([]byte(content))
+			pv = parquet.ByteArrayValue(a.copy(r.content(i)))
 		}
 	case jpeInt32, jpeInt64:
 		var n int64
@@ -589,12 +589,91 @@ func (e *jsonParquetEncoder) appendPartitionPath(b []byte, r *jpeRow, interpolat
 
 //------------------------------------------------------------------------------
 
+// jpeArena holds a group's rows until they are encoded: their values, and the
+// bytes of their UTF8 values, in chunks that double from a few rows up to
+// jpeArenaRows rows and jpeArenaBytes bytes, rather than an allocation for
+// every row and every string. A group's chunks are dropped with it once its
+// file is written, so the rows of a batch shrink as its files are encoded.
+type jpeArena struct {
+	values    []parquet.Value
+	bytes     []byte
+	nextRows  int
+	nextBytes int
+}
+
+const (
+	jpeArenaRows  = 256
+	jpeArenaBytes = 16 << 10
+)
+
+// row returns an n-value row.
+func (a *jpeArena) row(n int) parquet.Row {
+	if cap(a.values)-len(a.values) < n {
+		a.nextRows = min(max(2*a.nextRows, 8), jpeArenaRows)
+		a.values = make([]parquet.Value, 0, a.nextRows*n)
+	}
+	start := len(a.values)
+	a.values = a.values[:start+n]
+	return a.values[start : start+n : start+n]
+}
+
+// copy returns a copy of b. A value larger than a quarter chunk is copied on
+// its own, so that it does not waste the rest of one.
+func (a *jpeArena) copy(b []byte) []byte {
+	return jpeArenaCopy(a, b)
+}
+
+func (a *jpeArena) copyString(s string) []byte {
+	return jpeArenaCopy(a, s)
+}
+
+func jpeArenaCopy[T string | []byte](a *jpeArena, b T) []byte {
+	if len(b) > jpeArenaBytes/4 {
+		return []byte(b)
+	}
+	if cap(a.bytes)-len(a.bytes) < len(b) {
+		a.nextBytes = min(max(2*a.nextBytes, 1<<10), jpeArenaBytes)
+		for a.nextBytes < jpeArenaBytes && a.nextBytes < 4*len(b) {
+			a.nextBytes *= 2
+		}
+		a.bytes = make([]byte, 0, a.nextBytes)
+	}
+	start := len(a.bytes)
+	a.bytes = append(a.bytes, b...)
+	return a.bytes[start:len(a.bytes):len(a.bytes)]
+}
+
+// jpeArenaMark is where an arena's chunks stood before a row was taken.
+type jpeArenaMark struct {
+	values *parquet.Value
+	nv     int
+	bytes  *byte
+	nb     int
+}
+
+func (a *jpeArena) mark() jpeArenaMark {
+	return jpeArenaMark{unsafe.SliceData(a.values), len(a.values), unsafe.SliceData(a.bytes), len(a.bytes)}
+}
+
+// release gives back what was taken since m, of the chunks still current: a
+// dropped row's values and bytes.
+func (a *jpeArena) release(m jpeArenaMark) {
+	if unsafe.SliceData(a.values) == m.values {
+		clear(a.values[m.nv:])
+		a.values = a.values[:m.nv]
+	}
+	if unsafe.SliceData(a.bytes) == m.bytes {
+		a.bytes = a.bytes[:m.nb]
+	}
+}
+
 // jpeGroup is one output file: the rows of one partition path, held until the
 // batch is read, and then encoded while no other group's file is.
 type jpeGroup struct {
 	first *service.Message
 	key   string
 	rows  []parquet.Row
+	arena jpeArena
 }
 
 func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.MessageBatch) ([]service.MessageBatch, error) {
@@ -631,22 +710,6 @@ func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.Mes
 			drop(err)
 			continue
 		}
-		values := make(parquet.Row, len(e.columns))
-		for i := range e.columns {
-			c := &e.columns[i]
-			if c.interp != nil {
-				values[c.leaf] = parquet.ByteArrayValue([]byte(interpolated[i])).Level(0, 0, c.leaf)
-				continue
-			}
-			if values[c.leaf], err = e.value(c, row, i); err != nil {
-				err = fmt.Errorf("%v: %w", c.name, err)
-				break
-			}
-		}
-		if err != nil {
-			drop(err)
-			continue
-		}
 		if e.partition != nil {
 			if key, err = e.appendPartitionPath(key[:0], row, interpolated); err != nil {
 				drop(err)
@@ -654,14 +717,37 @@ func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.Mes
 			}
 		}
 		// The key is only copied into a string for a new partition: the
-		// comparison and lookup of string(key) do not allocate.
-		if current == nil || current.key != string(key) {
-			if current = byKey[string(key)]; current == nil {
-				current = &jpeGroup{first: msg, key: string(key)}
-				byKey[current.key] = current
-				groups = append(groups, current)
+		// comparison and lookup of string(key) do not allocate. A new group is
+		// only kept once a row of it is.
+		g, isNew := current, false
+		if g == nil || g.key != string(key) {
+			if g = byKey[string(key)]; g == nil {
+				g, isNew = &jpeGroup{first: msg, key: string(key)}, true
 			}
 		}
+		mark := g.arena.mark()
+		values := g.arena.row(len(e.columns))
+		for i := range e.columns {
+			c := &e.columns[i]
+			if c.interp != nil {
+				values[c.leaf] = parquet.ByteArrayValue(g.arena.copyString(interpolated[i])).Level(0, 0, c.leaf)
+				continue
+			}
+			if values[c.leaf], err = e.value(&g.arena, c, row, i); err != nil {
+				err = fmt.Errorf("%v: %w", c.name, err)
+				break
+			}
+		}
+		if err != nil {
+			g.arena.release(mark)
+			drop(err)
+			continue
+		}
+		if isNew {
+			byKey[g.key] = g
+			groups = append(groups, g)
+		}
+		current = g
 		current.rows = append(current.rows, values)
 	}
 	if dropped > 0 {
@@ -682,7 +768,7 @@ func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.Mes
 		if err := jpeEncode(parquet.NewGenericWriter[any](&buf, e.schema, e.codec, jpeNoWriteBuffer), g.rows); err != nil {
 			return nil, err
 		}
-		g.rows = nil
+		g.rows, g.arena = nil, jpeArena{}
 		m := g.first.Copy()
 		m.SetBytes(buf.Bytes())
 		if e.partition != nil {
