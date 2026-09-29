@@ -634,8 +634,9 @@ func (e *jsonParquetEncoder) appendPartitionPath(b []byte, r *jpeRow, interpolat
 //------------------------------------------------------------------------------
 
 // jpeArena holds a group's rows until they are encoded: their values, and the
-// bytes of their UTF8 values, in chunks that double from a few rows up to
-// jpeArenaRows rows and jpeArenaBytes bytes, rather than an allocation for
+// bytes of their UTF8 values, in chunks that double from one row and 64 bytes
+// up to jpeArenaRows rows and jpeArenaBytes bytes, so that a partition of a
+// few rows holds little more than they take, rather than an allocation for
 // every row and every string. A group's chunks are dropped with it once its
 // file is written, so the rows of a batch shrink as its files are encoded.
 type jpeArena struct {
@@ -653,7 +654,7 @@ const (
 // row returns an n-value row.
 func (a *jpeArena) row(n int) parquet.Row {
 	if cap(a.values)-len(a.values) < n {
-		a.nextRows = min(max(2*a.nextRows, 8), jpeArenaRows)
+		a.nextRows = min(max(2*a.nextRows, 1), jpeArenaRows)
 		a.values = make([]parquet.Value, 0, a.nextRows*n)
 	}
 	start := len(a.values)
@@ -677,7 +678,7 @@ func jpeArenaCopy[T string | []byte](a *jpeArena, b T) []byte {
 		return append([]byte(nil), b...)
 	}
 	if cap(a.bytes)-len(a.bytes) < len(b) {
-		a.nextBytes = min(max(2*a.nextBytes, 1<<10), jpeArenaBytes)
+		a.nextBytes = min(max(2*a.nextBytes, 64), jpeArenaBytes)
 		for a.nextBytes < jpeArenaBytes && a.nextBytes < 4*len(b) {
 			a.nextBytes *= 2
 		}
