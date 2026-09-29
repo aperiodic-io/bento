@@ -32,14 +32,13 @@ output:
     pattern: fan_out
     outputs:
       # Inline output configurations
-      - kafka:
-          addresses: [ "localhost:9092" ]
-          topic: topic_a
-      - kafka:
-          addresses: [ "localhost:9092" ]
-          topic: topic_b
+      - aws_s3:
+          bucket: bucket_a
+          path: ${! uuid_v4() }.json
+      - file:
+          path: ./output_b.jsonl
       # Or use resource references
-      - resource: my_http_output
+      - resource: my_other_output
 `+"```"+`
 
 [Processors](/docs/components/processors/about) can be listed to apply across individual outputs or all outputs:

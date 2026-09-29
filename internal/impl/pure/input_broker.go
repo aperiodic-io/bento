@@ -26,18 +26,17 @@ func brokerInputSpec() *service.ConfigSpec {
 		Description(`
 A broker type is configured with its own list of input configurations and a field to specify how many copies of the list of inputs should be created.
 
-Adding more input types allows you to combine streams from multiple sources into one. For example, reading from both RabbitMQ and Kafka:
+Adding more input types allows you to combine streams from multiple sources into one. For example, reading from both a file and Kafka:
 
 `+"```yaml"+`
 input:
   broker:
     copies: 1
     inputs:
-      - amqp_0_9:
-          urls:
-            - amqp://guest:guest@localhost:5672/
-          consumer_tag: bento-consumer
-          queue: bento-queue
+      - file:
+          paths: [ ./data/*.jsonl ]
+          scanner:
+            lines: {}
 
         # Optional list of input specific processing steps
         processors:
@@ -46,12 +45,12 @@ input:
               root.meta.link_count = this.links.length()
               root.user.age = this.user.age.number()
 
-      - kafka:
-          addresses:
+      - kafka_franz:
+          seed_brokers:
             - localhost:9092
           client_id: bento_kafka_input
           consumer_group: bento_consumer_group
-          topics: [ bento_stream:0 ]
+          topics: [ bento_stream ]
 `+"```"+`
 
 If the number of copies is greater than zero the list will be copied that number of times. For example, if your inputs were of type foo and bar, with 'copies' set to '2', you would end up with two 'foo' inputs and two 'bar' inputs.

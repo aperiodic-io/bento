@@ -17,29 +17,23 @@ func init() {
 			Stable().
 			Summary(`Returns the final message payload back to the input origin of the message, where it is dealt with according to that specific input type.`).
 			Description(`
-For most inputs this mechanism is ignored entirely, in which case the sync response is dropped without penalty. It is therefore safe to use this output even when combining input types that might not have support for sync responses. An example of an input able to utilise this is the `+"`http_server`"+`.
+For most inputs this mechanism is ignored entirely, in which case the sync response is dropped without penalty. It is therefore safe to use this output even when combining input types that might not have support for sync responses.
 
-It is safe to combine this output with others using broker types. For example, with the `+"`http_server`"+` input we could send the payload to a Kafka topic and also send a modified payload back with:
+It is safe to combine this output with others using broker types. For example, with an input that supports sync responses we could write the payload to a file and also send a modified payload back with:
 
 `+"```yaml"+`
-input:
-  http_server:
-    path: /post
 output:
   broker:
     pattern: fan_out
     outputs:
-      - kafka:
-          addresses: [ TODO:9092 ]
-          topic: foo_topic
+      - file:
+          path: ./foo.jsonl
       - sync_response: {}
         processors:
           - mapping: 'root = content().uppercase()'
 `+"```"+`
 
-Using the above example and posting the message 'hello world' to the endpoint `+"`/post`"+` Bento would send it unchanged to the topic `+"`foo_topic`"+` and also respond with 'HELLO WORLD'.
-
-For more information please read [Synchronous Responses](/docs/guides/sync_responses).`).
+Using the above example, a message 'hello world' would be written unchanged to the file `+"`./foo.jsonl`"+` and the input would also receive 'HELLO WORLD' as its response.`).
 			Field(service.NewObjectField("").Default(map[string]any{})),
 		func(conf *service.ParsedConfig, mgr *service.Resources) (out service.BatchOutput, batchPolicy service.BatchPolicy, maxInFlight int, err error) {
 			var s output.Streamed

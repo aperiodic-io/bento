@@ -27,13 +27,12 @@ func resourceInputSpec() *service.ConfigSpec {
 input:
   broker:
     inputs:
-      - kafka:
-          addresses: [ TODO ]
+      - kafka_franz:
+          seed_brokers: [ TODO ]
           topics: [ foo ]
           consumer_group: foogroup
-      - gcp_pubsub:
-          project: bar
-          subscription: baz
+      - file:
+          paths: [ ./bar/*.jsonl ]
 ` + "```" + `
 
 Could also be expressed as:
@@ -47,15 +46,14 @@ input:
 
 input_resources:
   - label: foo
-    kafka:
-      addresses: [ TODO ]
+    kafka_franz:
+      seed_brokers: [ TODO ]
       topics: [ foo ]
       consumer_group: foogroup
 
   - label: bar
-    gcp_pubsub:
-      project: bar
-      subscription: baz
+    file:
+      paths: [ ./bar/*.jsonl ]
  ` + "```" + `
 
 Resources also allow you to reference a single input in multiple places, such as multiple streams mode configs, or multiple entries in a broker input. However, when a resource is referenced more than once the messages it produces are distributed across those references, so each message will only be directed to a single reference, not all of them.

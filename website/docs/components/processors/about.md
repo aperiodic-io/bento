@@ -88,7 +88,7 @@ Future version will likely see more `error_handling` strategies that allow for p
 
 ## Using Processors as Outputs
 
-It might be the case that a processor that results in a side effect, such as the [`sql_insert`][processor.sql_insert] or [`redis`][processor.redis] processors, is the only side effect of a pipeline, and therefore could be considered the output.
+It might be the case that a processor that results in a side effect, such as the [`cache`][processor.cache] processor, is the only side effect of a pipeline, and therefore could be considered the output.
 
 In such cases it's possible to place these processors within a [`reject` output][output.reject] so that they behave the same as regular outputs, where success results in dropping the message with an acknowledgement and failure results in a nack (or retry):
 
@@ -97,14 +97,15 @@ output:
   reject: 'failed to send data: ${! error() }'
   processors:
     - try:
-        - redis:
-            url: tcp://localhost:6379
-            command: sadd
-            args_mapping: 'root = [ this.key, this.value ]'
+        - cache:
+            resource: foo
+            operator: set
+            key: '${! this.key }'
+            value: '${! this.value }'
         - mapping: root = deleted()
 ```
 
-The way this works is that if your processor with the side effect (`redis` in this case) succeeds then the final `mapping` processor deletes the message which results in an acknowledgement. If the processor fails then the `try` block exits early without executing the `mapping` processor and instead the message is routed to the `reject` output, which nacks the message with an error message containing the error obtained from the `redis` processor.
+The way this works is that if your processor with the side effect (`cache` in this case) succeeds then the final `mapping` processor deletes the message which results in an acknowledgement. If the processor fails then the `try` block exits early without executing the `mapping` processor and instead the message is routed to the `reject` output, which nacks the message with an error message containing the error obtained from the `cache` processor.
 
 import ComponentsByCategory from '@theme/ComponentsByCategory';
 
@@ -129,8 +130,7 @@ You can read more about batching [in this document][batching].
 [windowed_processing]: /docs/configuration/windowed_processing
 [pipelines]: /docs/configuration/processing_pipelines
 [output.reject]: /docs/components/outputs/reject
-[processor.sql_insert]: /docs/components/processors/sql_insert
-[processor.redis]: /docs/components/processors/redis
+[processor.cache]: /docs/components/processors/cache
 [processor.mapping]: /docs/components/processors/mapping
 [processor.mutation]: /docs/components/processors/mutation
 [processor.split]: /docs/components/processors/split

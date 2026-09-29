@@ -1,6 +1,6 @@
 input:
-  kafka:
-    addresses: [ TODO ]
+  kafka_franz:
+    seed_brokers: [ TODO ]
     topics: [ foo, bar ]
     consumer_group: foogroup
 

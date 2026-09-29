@@ -32,7 +32,6 @@ module.exports = {
         'configuration/processing_pipelines',
         'configuration/unit_testing',
         'configuration/templating',
-        'configuration/dynamic_inputs_and_outputs',
         'configuration/using_cue',
       ],
     },
@@ -110,13 +109,11 @@ module.exports = {
         },
         'guides/monitoring',
         'guides/performance_tuning',
-        'guides/sync_responses',
         {
           type: 'category',
           label: 'Cloud Credentials',
           items: [
             'guides/cloud/aws',
-            'guides/cloud/gcp',
           ],
         },
         {

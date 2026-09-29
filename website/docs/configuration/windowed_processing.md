@@ -43,8 +43,8 @@ A [`system_window` buffer][buffers.system_window] creates windows by following t
 
 ```yaml
 input:
-  kafka:
-    addresses: [ TODO ]
+  kafka_franz:
+    seed_brokers: [ TODO ]
     topics: [ traffic_data ]
     consumer_group: traffic_consumer
     checkpoint_limit: 1000

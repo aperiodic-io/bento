@@ -28,16 +28,18 @@ tests:
     config:
       max_retries: 5
       output:
-        http_client:
-          url: http://localhost:0
+        aws_s3:
+          bucket: foo
+          path: '${! uuid_v4() }.json'
       path: dead.log
     expected:
       fallback:
         - retry:
             max_retries: 5
             output:
-              http_client:
-                url: http://localhost:0
+              aws_s3:
+                bucket: foo
+                path: '${! uuid_v4() }.json'
         - file:
             path: dead.log
             codec: lines

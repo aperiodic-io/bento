@@ -44,9 +44,10 @@ const snippets = [
     further: '/docs/guides/bloblang/about',
     language: 'yaml',
     children: `input:
-  gcp_pubsub:
-    project: foo
-    subscription: bar
+  kafka_franz:
+    seed_brokers: [ TODO ]
+    topics: [ foo ]
+    consumer_group: bar
 
 pipeline:
   processors:
@@ -56,9 +57,9 @@ pipeline:
         root.user.age = this.user.age.number()
 
 output:
-  redis_streams:
-    url: tcp://TODO:6379
-    stream: baz
+  aws_s3:
+    bucket: baz
+    path: '\${! uuid_v4() }.json'
     max_in_flight: 20`,
   },
   {
@@ -66,8 +67,8 @@ output:
     further: '/docs/components/outputs/about#multiplexing-outputs',
     language: 'yaml',
     children: `input:
-  kafka:
-    addresses: [ TODO ]
+  kafka_franz:
+    seed_brokers: [ TODO ]
     topics: [ foo, bar ]
     consumer_group: foogroup
 
@@ -76,26 +77,24 @@ output:
     cases:
       - check: doc.tags.contains("AWS")
         output:
-          aws_sqs:
-            url: https://sqs.us-west-2.amazonaws.com/TODO/TODO
+          aws_s3:
+            bucket: aws-tagged
+            path: '\${! uuid_v4() }.json'
             max_in_flight: 20
 
       - output:
-          redis_pubsub:
-            url: tcp://TODO:6379
-            channel: baz
-            max_in_flight: 20`,
+          file:
+            path: ./everything_else.jsonl`,
   },
   {
     label: 'Windowing',
     further: '/docs/configuration/windowed_processing',
     language: 'yaml',
     children: `input:
-  nats_jetstream:
-    urls: [ nats://TODO:4222 ]
-    queue: myqueue
-    subject: traffic.light.events
-    deliver: all
+  kafka_franz:
+    seed_brokers: [ TODO ]
+    topics: [ traffic.light.events ]
+    consumer_group: traffic
 
 buffer:
   system_window:
@@ -117,43 +116,10 @@ pipeline:
         } else { deleted() }
 
 output:
-  http_client:
-    url: https://example.com/traffic_data
-    verb: POST
-    max_in_flight: 64`,
-  },
-  {
-    label: 'Enrichments',
-    further: '/cookbooks/enrichments',
-    language: 'yaml',
-    children: `input:
-  mqtt:
-    urls: [ tcp://TODO:1883 ]
-    topics: [ foo ]
-
-pipeline:
-  processors:
-    - branch:
-        request_map: |
-          root.id = this.doc.id
-          root.content = this.doc.body
-        processors:
-          - aws_lambda:
-              function: sentiment_analysis
-        result_map: root.results.sentiment = this
-
-output:
   aws_s3:
-    bucket: TODO
-    path: '\${! metadata("partition") }/\${! timestamp_unix_nano() }.tar.gz'
-    batching:
-      count: 100
-      period: 10s
-      processors:
-        - archive:
-            format: tar
-        - compress:
-            algorithm: gzip`,
+    bucket: traffic-data
+    path: '\${! uuid_v4() }.json'
+    max_in_flight: 64`,
   },
 ];
 
@@ -176,10 +142,7 @@ const features = [
     description: (
       <>
         <p>
-          Bento is able to glue a wide range of <a href="/bento/docs/components/inputs/about">sources</a> and <a href="/bento/docs/components/outputs/about">sinks</a> together and hook into a variety of <a href="/bento/docs/components/processors/sql_raw">databases</a>, <a href="/bento/docs/components/processors/cache">caches</a>, <a href="/bento/docs/components/processors/http">HTTP APIs</a>, <a href="/bento/docs/components/processors/aws_lambda">lambdas</a> and <a href="/bento/docs/components/processors/about">more processors</a>, enabling you to seamlessly drop it into your existing infrastructure.
-        </p>
-        <p>
-          Working with disparate APIs and services can be a daunting task, doubly so in a streaming data context. With Bento it's possible to break these tasks down and automatically parallelize them as <a href="/bento/cookbooks/enrichments">a streaming workflow</a>.
+          Bento is able to glue a wide range of <a href="/bento/docs/components/inputs/about">sources</a> and <a href="/bento/docs/components/outputs/about">sinks</a> together and hook into <a href="/bento/docs/components/processors/cache">caches</a> and <a href="/bento/docs/components/processors/about">more processors</a>, enabling you to seamlessly drop it into your existing infrastructure.
         </p>
       </>
     ),
@@ -205,7 +168,7 @@ const features = [
           Sometimes the components that come with Bento aren't enough. Luckily, Bento has been designed to be easily plugged with whatever components you need.
         </p>
         <p>
-          You can either write plugins <a href="https://pkg.go.dev/github.com/warpstreamlabs/bento/public" aria-label="Learn how to write Bento plugins in Go">directly in Go (recommended)</a> or you can have Bento run your plugin as a <a href="/bento/docs/components/processors/subprocess" aria-label="Learn about Bento subprocess plugins">subprocess</a>.
+          You can write plugins <a href="https://pkg.go.dev/github.com/warpstreamlabs/bento/public" aria-label="Learn how to write Bento plugins in Go">directly in Go</a>.
         </p>
       </>
     ),

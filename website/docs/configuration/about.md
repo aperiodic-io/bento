@@ -19,8 +19,8 @@ import TabItem from '@theme/TabItem';
 
 ```yaml
 input:
-  kafka:
-    addresses: [ TODO ]
+  kafka_franz:
+    seed_brokers: [ TODO ]
     topics: [ foo, bar ]
     consumer_group: foogroup
 
@@ -45,8 +45,8 @@ http:
   debug_endpoints: false
 
 input:
-  kafka:
-    addresses: [ TODO ]
+  kafka_franz:
+    seed_brokers: [ TODO ]
     topics: [ foo, bar ]
     consumer_group: foogroup
 
@@ -105,8 +105,8 @@ Sometimes it's useful to write a configuration where certain fields can be defin
 
 ```yaml
 input:
-  kafka:
-    addresses:
+  kafka_franz:
+    seed_brokers:
     - ${KAFKA_BROKER:localhost:9092}
     topics:
     - ${KAFKA_TOPIC:default-topic}
@@ -118,7 +118,7 @@ This is very useful for sharing configuration files across different deployment 
 
 Sometimes it's necessary to use a rather large component multiple times. Instead of copy/pasting the configuration or using YAML anchors you can define your component [as a resource][config.resources].
 
-In the following example we want to make an HTTP request with our payloads. Occasionally the payload might get rejected due to garbage within its contents, and so we catch these rejected requests, attempt to "cleanse" the contents and try to make the same HTTP request again. Since the HTTP request component is quite large (and likely to change over time) we make sure to avoid duplicating it by defining it as a resource `get_foo`:
+In the following example we want to look up a value from a cache using the contents of our payloads as the key. Occasionally the lookup might fail due to garbage within the contents, and so we catch these failed lookups, attempt to "cleanse" the contents and try the same lookup again. Since the lookup component is likely to change over time we make sure to avoid duplicating it by defining it as a resource `get_foo`:
 
 ```yaml
 pipeline:
@@ -132,12 +132,10 @@ pipeline:
 
 processor_resources:
   - label: get_foo
-    http:
-      url: http://example.com/foo
-      verb: POST
-      headers:
-        SomeThing: "set-to-this"
-        SomeThingElse: "set-to-something-else"
+    cache:
+      resource: foo_cache
+      operator: get
+      key: '${! json("content") }'
 ```
 
 ### Feature Toggles
@@ -155,12 +153,10 @@ And then two resource files, one stored at the path `./staging/request.yaml`:
 ```yaml
 processor_resources:
   - label: get_foo
-    http:
-      url: http://example.com/foo
-      verb: POST
-      headers:
-        SomeThing: "set-to-this"
-        SomeThingElse: "set-to-something-else"
+    cache:
+      resource: staging_cache
+      operator: get
+      key: '${! json("content") }'
 ```
 
 And another stored at the path `./production/request.yaml`:
@@ -168,11 +164,10 @@ And another stored at the path `./production/request.yaml`:
 ```yaml
 processor_resources:
   - label: get_foo
-    http:
-      url: http://example.com/bar
-      verb: PUT
-      headers:
-        Desires: "are-empty"
+    cache:
+      resource: production_cache
+      operator: get
+      key: '${! json("content") }'
 ```
 
 We can select our chosen resource by changing which file we import, either running:
@@ -219,22 +214,22 @@ However, a user often only needs to get their hands on a short, runnable example
 
 ```yaml
 input:
-  amqp_0_9:
-    urls: [ amqp://guest:guest@localhost:5672/ ]
-    consumer_tag: bento-consumer
-    queue: bento-queue
-    prefetch_count: 10
-    prefetch_size: 0
+  kafka_franz:
+    seed_brokers: [ localhost:9092 ]
+    topics: [ bento_stream ]
+    consumer_group: bento_group
+    commit_period: 5s
+    start_from_oldest: true
 output:
   stdout: {}
 ```
 
 In order to make this process easier Bento is able to generate usable configuration examples for any types, and you can do this from the binary using the `create` subcommand.
 
-If, for example, we wanted to generate a config with a websocket input, a Kafka output and a [`mapping` processor][processors.mapping] in the middle, we could do it with the following command:
+If, for example, we wanted to generate a config with a Kafka input, an S3 output and a [`mapping` processor][processors.mapping] in the middle, we could do it with the following command:
 
 ```text
-bento create websocket/mapping/kafka
+bento create kafka_franz/mapping/aws_s3
 ```
 
 > If you need a gentle reminder as to which components Bento offers you can see those as well with `bento list`.
@@ -253,19 +248,19 @@ However, with validation it can be hard to capture all problems, and the user us
 
 If you attempt to run a config that has linting errors Bento will print the errors and halt execution. If, however, you want to test your configs before deployment you can do so with the `lint` subcommand:
 
-For example, imagine we have a config `foo.yaml`, where we intend to read from AMQP, but there is a typo in our config struct:
+For example, imagine we have a config `foo.yaml`, where we intend to read from Kafka, but there is a typo in our config struct:
 
 ```text
 input:
-  amqp_0_9:
-    yourl: amqp://guest:guest@rabbitmqserver:5672/
+  kafka_franz:
+    seed_brokerz: [ kafkaserver:9092 ]
 ```
 
 We can catch this error before attempting to run the config:
 
 ```sh
 $ bento lint ./foo.yaml
-./foo.yaml: line 3: field yourl not recognised
+./foo.yaml(3,1) field seed_brokerz not recognised
 ```
 
 For more information read the output from `bento lint --help`.

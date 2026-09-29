@@ -81,8 +81,7 @@ pipeline:
 
 cache_resources:
   - label: foocache
-    redis:
-      url: tcp://TODO:6379
+    memory: {}
 ```
 
 </TabItem>
@@ -136,8 +135,7 @@ pipeline:
 
 cache_resources:
   - label: foocache
-    memcached:
-      addresses: [ "TODO:11211" ]
+    memory: {}
 ```
 
 </TabItem>

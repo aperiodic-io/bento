@@ -46,9 +46,9 @@ output:
     cases:
       - check: '!errored()'
         output:
-          amqp_1:
-            urls: [ amqps://guest:guest@localhost:5672/ ]
-            target_address: queue:/the_foos
+          aws_s3:
+            bucket: the_foos
+            path: ${! uuid_v4() }.json
 
       - output:
           reject: "processing failed due to: ${! error() }"

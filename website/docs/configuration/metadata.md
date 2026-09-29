@@ -40,13 +40,13 @@ meta = @.filter(kv -> !kv.key.has_prefix("kafka_"))
 There are two functions to reference metadata: [`meta()`][meta] and [`metadata()`][metadata]. [`meta()`][meta] has been depreciated in favor of [`metadata()`][metadata].
 :::
 
-Metadata values can be referenced in any field that supports [interpolation functions][interpolation]. For example, you can route messages to Kafka topics using interpolation of metadata keys:
+Metadata values can be referenced in any field that supports [interpolation functions][interpolation]. For example, you can route messages to S3 key prefixes using interpolation of metadata keys:
 
 ```yaml
 output:
-  kafka:
-    addresses: [ TODO ]
-    topic: ${! metadata("target_topic") }
+  aws_s3:
+    bucket: TODO
+    path: ${! metadata("target_prefix") }/${! uuid_v4() }.json
 ```
 
 Bento also allows you to conditionally process messages based on their metadata with the [`switch` processor][processors.switch]:
@@ -57,33 +57,25 @@ pipeline:
   - switch:
     - check: '@doc_type == "nested"'
       processors:
-        - sql_insert:
-            driver: mysql
-            dsn: foouser:foopassword@tcp(localhost:3306)/foodb
-            table: footable
-            columns: [ foo, bar, baz ]
-            args_mapping: |
-              root = [
-                this.document.foo,
-                this.document.bar,
-                @kafka_topic,
-              ]
+        - mapping: |
+            root = this.document
+            root.topic = @kafka_topic
 ```
 
 ## Restricting Metadata
 
 Outputs that support metadata, headers or some other variant of enriched fields on messages will attempt to send all metadata key/value pairs by default. However, sometimes it's useful to refer to metadata fields at the output level even though we do not wish to send them with our data. In this case it's possible to restrict the metadata keys that are sent with the field `metadata.exclude_prefixes` within the respective output config.
 
-For example, if we were sending messages to kafka using a metadata key `target_topic` to determine the topic but we wished to prevent that metadata key from being sent as a header we could use the following configuration:
+For example, if we were sending messages to S3 using a metadata key `target_prefix` to determine the object key prefix but we wished to prevent that metadata key from being sent as object metadata we could use the following configuration:
 
 ```yaml
 output:
-  kafka:
-    addresses: [ TODO ]
-    topic: ${! metadata("target_topic") }
+  aws_s3:
+    bucket: TODO
+    path: ${! metadata("target_prefix") }/${! uuid_v4() }.json
     metadata:
       exclude_prefixes:
-        - target_topic
+        - target_prefix
 ```
 
 And when the list of metadata keys that we do _not_ want to send is large it can be helpful to use a [Bloblang mapping][guides.bloblang] in order to give all of these "private" keys a common prefix:
@@ -104,9 +96,9 @@ pipeline:
         })
 
 output:
-  kafka:
-    addresses: [ TODO ]
-    topic: ${! metadata("_target_topic") }
+  aws_s3:
+    bucket: TODO
+    path: ${! metadata("_target_prefix") }/${! uuid_v4() }.json
     metadata:
       exclude_prefixes: [ "_" ]
 ```

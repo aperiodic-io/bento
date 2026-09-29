@@ -12,8 +12,8 @@ Every Bento pipeline has at least one [input][inputs], an optional [buffer][buff
 
 ```yaml
 input:
-  kafka:
-    addresses: [ TODO ]
+  kafka_franz:
+    seed_brokers: [ TODO ]
     topics: [ foo, bar ]
     consumer_group: foogroup
 
@@ -49,13 +49,10 @@ logger:
   level: WARN
 
 metrics:
-  statsd:
-    address: localhost:8125
-    flush_period: 100ms
+  prometheus: {}
 
 tracer:
-  jaeger:
-    agent_address: localhost:6831
+  none: {}
 ```
 
 ## Resource Components
@@ -64,8 +61,10 @@ Finally, there are [caches][caches] and [rate limits][rate_limits]. These are co
 
 ```yaml
 input:
-  http_client: # This is an input
-    url: TODO
+  kafka_franz: # This is an input
+    seed_brokers: [ TODO ]
+    topics: [ foo ]
+    consumer_group: foogroup
     rate_limit: foo_ratelimit # This is a reference to a rate limit
 
 pipeline:
@@ -85,8 +84,8 @@ rate_limit_resources:
 
 cache_resources:
   - label: baz_cache
-    memcached:
-      addresses: [ localhost:11211 ]
+    memory:
+      default_ttl: 5m
 ```
 
 It's also possible to configure inputs, outputs and processors as resources which allows them to be reused throughout a configuration with the [`resource` input][inputs.resource], [`resource` output][outputs.resource] and [`resource` processor][processors.resource] respectively.

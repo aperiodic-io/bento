@@ -8,9 +8,7 @@ A cache is a key/value store which can be used by certain components for applica
 ```yaml
 cache_resources:
   - label: foobar
-    memcached:
-      addresses:
-        - localhost:11211
+    memory:
       default_ttl: 60s
 ```
 

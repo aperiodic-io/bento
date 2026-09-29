@@ -110,36 +110,11 @@ result_map: |-
 
 ## Examples
 
-<Tabs defaultValue="HTTP Request" values={[
-{ label: 'HTTP Request', value: 'HTTP Request', },
+<Tabs defaultValue="Non Structured Results" values={[
 { label: 'Non Structured Results', value: 'Non Structured Results', },
-{ label: 'Lambda Function', value: 'Lambda Function', },
 { label: 'Conditional Caching', value: 'Conditional Caching', },
 ]}>
 
-<TabItem value="HTTP Request">
-
-
-This example strips the request message into an empty body, grabs an HTTP payload, and places the result back into the original message at the path `image.pull_count`:
-
-```yaml
-pipeline:
-  processors:
-    - branch:
-        request_map: 'root = ""'
-        processors:
-          - http:
-              url: https://hub.docker.com/v2/repositories/library/alpine
-              verb: GET
-              headers:
-                Content-Type: application/json
-        result_map: root.image.pull_count = this.pull_count
-
-# Example input:  {"id":"foo","some":"pre-existing data"}
-# Example output: {"id":"foo","some":"pre-existing data","image":{"pull_count":1234}}
-```
-
-</TabItem>
 <TabItem value="Non Structured Results">
 
 
@@ -159,25 +134,6 @@ pipeline:
 
 # Example input:  {"document":{"id":"foo","content":"hello world"}}
 # Example output: {"document":{"id":"foo","content":"hello world","description":"this is a cool doc"}}
-```
-
-</TabItem>
-<TabItem value="Lambda Function">
-
-
-This example maps a new payload for triggering a lambda function with an ID and username from the original message, and the result of the lambda is discarded, meaning the original message is unchanged.
-
-```yaml
-pipeline:
-  processors:
-    - branch:
-        request_map: '{"id":this.doc.id,"username":this.user.name}'
-        processors:
-          - aws_lambda:
-              function: trigger_user_update
-
-# Example input: {"doc":{"id":"foo","body":"hello world"},"user":{"name":"fooey"}}
-# Output matches the input, which is unchanged
 ```
 
 </TabItem>

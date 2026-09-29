@@ -22,23 +22,6 @@ You can import resources either in the general configuration, or using the `-r`/
 bento -r "./prod/*.yaml" -c ./config.yaml streams
 ```
 
-## HTTP Endpoints
-
-A Bento config can contain components such as an `http_server` input that register endpoints to the service-wide HTTP server. When these components are created from within a named stream in streams mode the endpoint will be prefixed with the streams identifier by default. For example, a stream with the identifier `foo` and the config:
-
-```yaml
-input:
-  http_server:
-    path: /meow
-pipeline:
-  processors:
-    - mapping: 'root = "meow " + content()'
-output:
-  sync_response: {}
-```
-
-Will register an endpoint `/meow`, which will be prefixed with the name `foo` to become `/foo/meow`. This behaviour is intended to make a clearer distinction between endpoints registered by different streams, and prevent collisions of those endpoints. However, you can disable this behaviour by setting the flag `--prefix-stream-endpoints` to `false` (`bento streams --prefix-stream-endpoints=false ./streams/*.yaml`).
-
 ## Resources
 
 When running Bento in streams mode [resource components][resources] are shared across all streams. The streams mode HTTP API also provides an endpoint for modifying and adding resource configurations dynamically.

@@ -81,43 +81,28 @@ Type: `output`
 
 ## Examples
 
-<Tabs defaultValue="Dropping failed HTTP requests" values={[
-{ label: 'Dropping failed HTTP requests', value: 'Dropping failed HTTP requests', },
-{ label: 'Dropping from outputs that cannot connect', value: 'Dropping from outputs that cannot connect', },
+<Tabs defaultValue="Dropping failed writes to a secondary output" values={[
+{ label: 'Dropping failed writes to a secondary output', value: 'Dropping failed writes to a secondary output', },
 ]}>
 
-<TabItem value="Dropping failed HTTP requests">
+<TabItem value="Dropping failed writes to a secondary output">
 
-In this example we have a fan_out broker, where we guarantee delivery to our Kafka output, but drop messages if they fail our secondary HTTP client output.
+In this example we have a fan_out broker, where we guarantee delivery to our primary bucket, but drop messages if they fail our secondary one.
 
 ```yaml
 output:
   broker:
     pattern: fan_out
     outputs:
-      - kafka:
-          addresses: [ foobar:6379 ]
-          topic: foo
+      - aws_s3:
+          bucket: primary
+          path: foo/${! uuid_v4() }.json
       - drop_on:
           error: true
           output:
-            http_client:
-              url: http://example.com/foo/messages
-              verb: POST
-```
-
-</TabItem>
-<TabItem value="Dropping from outputs that cannot connect">
-
-Most outputs that attempt to establish and long-lived connection will apply back-pressure when the connection is lost. The following example has a websocket output where if it takes longer than 10 seconds to establish a connection, or recover a lost one, pending messages are dropped.
-
-```yaml
-output:
-  drop_on:
-    back_pressure: 10s
-    output:
-      websocket:
-        url: ws://example.com/foo/messages
+            aws_s3:
+              bucket: secondary
+              path: foo/${! uuid_v4() }.json
 ```
 
 </TabItem>

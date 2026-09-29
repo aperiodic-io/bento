@@ -71,14 +71,13 @@ output:
     pattern: fan_out
     outputs:
       # Inline output configurations
-      - kafka:
-          addresses: [ "localhost:9092" ]
-          topic: topic_a
-      - kafka:
-          addresses: [ "localhost:9092" ]
-          topic: topic_b
+      - aws_s3:
+          bucket: bucket_a
+          path: ${! uuid_v4() }.json
+      - file:
+          path: ./output_b.jsonl
       # Or use resource references
-      - resource: my_http_output
+      - resource: my_other_output
 ```
 
 [Processors](/docs/components/processors/about) can be listed to apply across individual outputs or all outputs:
@@ -115,14 +114,12 @@ output:
   broker:
     pattern: fan_out
     outputs:
-      - gcp_bigquery:
-          project: my-project
-          dataset: raw_data
-          table: events
-      - gcp_bigquery:
-          project: my-project
-          dataset: analytics
-          table: events_aggregated
+      - aws_s3:
+          bucket: raw-data
+          path: events/${! uuid_v4() }.json
+      - aws_s3:
+          bucket: analytics
+          path: events_aggregated/${! uuid_v4() }.json
       - file:
           path: /backup/events.jsonl
           codec: lines
@@ -138,12 +135,15 @@ output:
   broker:
     pattern: round_robin
     outputs:
-      - http_client:
-          url: http://api1.example.com/data
-      - http_client:
-          url: http://api2.example.com/data
-      - http_client:
-          url: http://api3.example.com/data
+      - aws_s3:
+          bucket: archive-1
+          path: data/${! uuid_v4() }.json
+      - aws_s3:
+          bucket: archive-2
+          path: data/${! uuid_v4() }.json
+      - aws_s3:
+          bucket: archive-3
+          path: data/${! uuid_v4() }.json
 ```
 
 </TabItem>

@@ -55,9 +55,9 @@ If you wish to wrap a batch-aware series of processors then take a look at the [
 
 When messages are batched the child processors of a `+"retry"+` are executed for each individual message in isolation, performed serially by default but in parallel when the field `+"[`parallel`](#parallel) is set to `true`"+`. This is an intentional limitation of the retry processor and is done in order to ensure that errors are correctly associated with a given input message. Otherwise, the archiving, expansion, grouping, filtering and so on of the child processors could obfuscate this relationship.
 
-If the target behaviour of your retried processors is "batch aware", in that you wish to perform some processing across the entire batch of messages and repeat it in the event of errors, you can use an `+"[`archive` processor](/docs/components/processors/archive)"+` to collapse the batch into an individual message. Then, within these child processors either perform your batch aware processing on the archive, or use an `+"[`unarchive` processor](/docs/components/processors/unarchive)"+` in order to expand the single message back out into a batch.
+If the target behaviour of your retried processors is "batch aware", in that you wish to perform some processing across the entire batch of messages and repeat it in the event of errors, you can use an `+"[`archive` processor](/docs/components/processors/archive)"+` to collapse the batch into an individual message. Then, within these child processors perform your batch aware processing on the archive.
 
-For example, if the retry processor were being used to wrap an HTTP request where the payload data is a batch archived into a JSON array it should look something like this:
+For example, if the retry processor were being used to wrap a cache write where the payload data is a batch archived into a JSON array it should look something like this:
 
 `+"```yaml"+`
 pipeline:
@@ -66,11 +66,11 @@ pipeline:
         format: json_array
     - retry:
         processors:
-          - http:
-              url: example.com/nope
-              verb: POST
-    - unarchive:
-        format: json_array
+          - cache:
+              resource: foo
+              operator: set
+              key: ${! json("0.id") }
+              value: ${! content() }
 `+"```"+`
 `).
 		Fields(

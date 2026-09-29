@@ -148,9 +148,9 @@ output:
           retry:
             max_retries: 5
             output:
-              gcp_pubsub:
-                project: "sample-project"
-                topic: "sample-topic"
+              aws_s3:
+                bucket: "sample-bucket"
+                path: "${! uuid_v4() }.json"
 ```
 
 There are quite a few lines of YAML here and we seem to be going sideways as we compose more functionality. We can try and make this more manageable with CUE!
@@ -239,9 +239,8 @@ bento.#Config & {
 
     #errorHandling: "drop"
 
-    #output: http_client: {
-      url: "http://localhost:4195/sad-blob"
-      retries: 0
+    #output: aws_s3: {
+      bucket: "sad-blobs"
     }
   }
 }
@@ -269,9 +268,8 @@ output:
             - retry:
                 max_retries: 3
                 output:
-                  http_client:
-                    url: http://localhost:4195/sad-blob
-                    retries: 0
+                  aws_s3:
+                    bucket: sad-blobs
             - drop: {}
               processors:
                 - log:

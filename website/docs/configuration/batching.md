@@ -14,9 +14,9 @@ For most users the only benefit of batching messages is improving throughput ove
 
 ```yaml
 output:
-  kafka:
-    addresses: [ todo:9092 ]
-    topic: bento_stream
+  aws_s3:
+    bucket: TODO
+    path: ${! uuid_v4() }.json
 
     # Either send batches when they reach 10 messages or when 100ms has passed
     # since the last batch.
@@ -25,21 +25,22 @@ output:
       period: 100ms
 ```
 
-However, a small number of inputs such as [`kafka`][input_kafka] must be consumed sequentially (in this case by partition) and therefore benefit from specifying your batch policy at the input level instead:
+However, a small number of inputs such as [`kafka_franz`][input_kafka] must be consumed sequentially (in this case by partition) and therefore benefit from specifying your batch policy at the input level instead:
 
 ```yaml
 input:
-  kafka:
-    addresses: [ todo:9092 ]
+  kafka_franz:
+    seed_brokers: [ todo:9092 ]
     topics: [ bento_input_stream ]
+    consumer_group: bento_group
     batching:
       count: 10
       period: 100ms
 
 output:
-  kafka:
-    addresses: [ todo:9092 ]
-    topic: bento_stream
+  aws_s3:
+    bucket: TODO
+    path: ${! uuid_v4() }.json
 ```
 
 Inputs that behave this way are documented as such and have a `batching` configuration block.
@@ -125,15 +126,16 @@ This is also useful when your input source creates batches that are too large fo
 
 ```yaml
 input:
-  aws_s3:
-    bucket: todo
+  kafka_franz:
+    seed_brokers: [ todo:9092 ]
+    topics: [ bento_input_stream ]
+    consumer_group: bento_group
+    batching:
+      count: 1000
+      period: 1s
 
 pipeline:
   processors:
-    - decompress:
-        algorithm: gzip
-    - unarchive:
-        format: tar
     # Limit batch sizes to 5MB
     - split:
         byte_size: 5_000_000
@@ -153,9 +155,9 @@ This allows you to combine conditions:
 
 ```yaml
 output:
-  kafka:
-    addresses: [ todo:9092 ]
-    topic: bento_stream
+  aws_s3:
+    bucket: TODO
+    path: ${! uuid_v4() }.json
 
     # Either send batches when they reach 10 messages or when 100ms has passed
     # since the last batch.
@@ -178,8 +180,9 @@ A batch policy also has a field `processors` which allows you to define an optio
 
 ```yaml
 output:
-  http_client:
-    url: http://localhost:4195/post
+  aws_s3:
+    bucket: TODO
+    path: ${! uuid_v4() }.txt
     batching:
       count: 10
       processors:
@@ -187,7 +190,7 @@ output:
             format: lines
 ```
 
-The above config will batch up messages and then merge them into a line delimited format before sending it over HTTP. This is an easier format to parse than the default which would have been [rfc1342](https://www.w3.org/Protocols/rfc1341/7_2_Multipart.html).
+The above config will batch up messages and then merge them into a line delimited format before uploading it to S3 as a single object. Without the archive step each message of the batch would have been uploaded as a separate object.
 
 During shutdown any remaining messages waiting for a batch to complete will be flushed down the pipeline.
 
@@ -195,13 +198,12 @@ During shutdown any remaining messages waiting for a batch to complete will be f
 [processor.while]: /docs/components/processors/while
 [split]: /docs/components/processors/split
 [archive]: /docs/components/processors/archive
-[unarchive]: /docs/components/processors/unarchive
 [proc_for_each]: /docs/components/processors/for_each
 [proc_group_by]: /docs/components/processors/group_by
 [proc_archive]: /docs/components/processors/archive
 [input_broker]: /docs/components/inputs/broker
 [output_broker]: /docs/components/outputs/broker
-[input_kafka]: /docs/components/inputs/kafka
+[input_kafka]: /docs/components/inputs/kafka_franz
 [function_interpolation]: /docs/configuration/interpolation#bloblang-queries
 [bloblang]: /docs/guides/bloblang/about
 [windowing]: /docs/configuration/windowed_processing

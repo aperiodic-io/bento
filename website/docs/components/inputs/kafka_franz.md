@@ -205,7 +205,7 @@ Default: `""`
 ### `checkpoint_limit`
 
 :::caution 
-			Setting this `checkpoint_limit: 1`_will not_ enforce 'strict ordered' processing of records. Use the [kafka input processor](/docs/components/inputs/kafka/) for 'strict ordered' processing.
+			Setting this `checkpoint_limit: 1`_will not_ enforce 'strict ordered' processing of records.
 :::
 			
 			Determines how many messages of the same partition can be processed in parallel before applying back pressure. When a message of a given offset is delivered to the output the offset is only allowed to be committed when all messages of prior offsets have also been delivered, this ensures at-least-once delivery guarantees. However, this mechanism also increases the likelihood of duplicates in the event of crashes or server faults, reducing the checkpoint limit will mitigate this.
@@ -499,14 +499,6 @@ sasl:
   - mechanism: SCRAM-SHA-512
     password: bar
     username: foo
-
-sasl:
-  - kerberos_config_path: /etc/krb5.conf
-    keytab_path: /etc/security/keytabs/kafka.keytab
-    mechanism: GSSAPI
-    principal: kafka_client/host.example.com
-    realm: EXAMPLE.COM
-    service_name: kafka
 ```
 
 ### `sasl[].mechanism`
@@ -518,8 +510,6 @@ Type: `string`
 
 | Option | Summary |
 |---|---|
-| `AWS_MSK_IAM` | AWS IAM based authentication as specified by the 'aws-msk-iam-auth' java library. |
-| `GSSAPI` | GSSAPI / Kerberos based authentication. |
 | `OAUTHBEARER` | OAuth Bearer based authentication. |
 | `PLAIN` | Plain text authentication. |
 | `SCRAM-SHA-256` | SCRAM based authentication as specified in RFC5802. |
@@ -618,151 +608,6 @@ Key/value pairs to add to OAUTHBEARER authentication requests.
 
 
 Type: `object`  
-
-### `sasl[].aws`
-
-Contains AWS specific fields for when the `mechanism` is set to `AWS_MSK_IAM`.
-
-
-Type: `object`  
-
-### `sasl[].aws.region`
-
-The AWS region to target.
-
-
-Type: `string`  
-Default: `""`  
-
-### `sasl[].aws.endpoint`
-
-Allows you to specify a custom endpoint for the AWS API.
-
-
-Type: `string`  
-Default: `""`  
-
-### `sasl[].aws.credentials`
-
-Optional manual configuration of AWS credentials to use. More information can be found [in this document](/docs/guides/cloud/aws).
-
-
-Type: `object`  
-
-### `sasl[].aws.credentials.profile`
-
-A profile from `~/.aws/credentials` to use.
-
-
-Type: `string`  
-Default: `""`  
-
-### `sasl[].aws.credentials.id`
-
-The ID of credentials to use.
-
-
-Type: `string`  
-Default: `""`  
-
-### `sasl[].aws.credentials.secret`
-
-The secret for the credentials being used.
-:::warning Secret
-This field contains sensitive information that usually shouldn't be added to a config directly, read our [secrets page for more info](/docs/configuration/secrets).
-:::
-
-
-Type: `string`  
-Default: `""`  
-
-### `sasl[].aws.credentials.token`
-
-The token for the credentials being used, required when using short term credentials.
-
-
-Type: `string`  
-Default: `""`  
-
-### `sasl[].aws.credentials.from_ec2_role`
-
-Use the credentials of a host EC2 machine configured to assume [an IAM role associated with the instance](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_switch-role-ec2.html).
-
-
-Type: `bool`  
-Default: `false`  
-
-### `sasl[].aws.credentials.role`
-
-A role ARN to assume.
-
-
-Type: `string`  
-Default: `""`  
-
-### `sasl[].aws.credentials.role_external_id`
-
-An external ID to provide when assuming a role.
-
-
-Type: `string`  
-Default: `""`  
-
-### `sasl[].aws.credentials.expiry_window`
-
-Allow the credentials to trigger refreshing prior to the credentials actually expiring. This is beneficial so race conditions with expiring credentials do not cause requests to fail. For example '10s' would refresh credentials ten seconds before expiration. Setting to a duration of `0` disables the expiry window.
-
-
-Type: `string`  
-Default: `""`  
-
-### `sasl[].kerberos_config_path`
-
-The path to a kerberos configuration file (krb5.conf). Used when mechanism is set to `GSSAPI`.
-
-
-Type: `string`  
-Default: `"/etc/krb5.conf"`  
-
-### `sasl[].keytab_path`
-
-The path to a keytab file to use for authentication with the kerberos client.
-
-
-Type: `string`  
-Default: `""`  
-
-### `sasl[].principal`
-
-The principal to use for kerberos authentication, e.g. `kafka_client/host.example.com`.
-
-
-Type: `string`  
-Default: `""`  
-
-### `sasl[].realm`
-
-The realm to use for kerberos authentication.
-
-
-Type: `string`  
-Default: `""`  
-
-### `sasl[].service_name`
-
-The service name to use when constructing a service ticket with the kerberos client, e.g. `kafka` (default).
-
-
-Type: `string`  
-Default: `"kafka"`  
-
-### `sasl[].disable_pafx_fast`
-
-Controls whether to use PA_FX_FAST in AS_REQ (pre-authentication fast).
-
-
-Type: `bool`  
-Default: `false`  
 
 ### `multi_header`
 

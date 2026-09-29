@@ -40,9 +40,10 @@ The most straight forward use case for this output type is to nack messages that
 
 ```yaml
 input:
-  nats_jetstream:
-    urls: [ nats://127.0.0.1:4222 ]
-    subject: foos.pending
+  kafka_franz:
+    seed_brokers: [ localhost:9092 ]
+    topics: [ foos_pending ]
+    consumer_group: foos
 
 pipeline:
   processors:
@@ -50,9 +51,9 @@ pipeline:
 
 output:
   reject_errored:
-    nats_jetstream:
-      urls: [ nats://127.0.0.1:4222 ]
-      subject: foos.processed
+    aws_s3:
+      bucket: foos_processed
+      path: ${! uuid_v4() }.json
 ```
 
 </TabItem>
@@ -69,14 +70,11 @@ pipeline:
 output:
   fallback:
     - reject_errored:
-        http_client:
-          url: http://foo:4195/post/might/become/unreachable
-          retries: 3
-          retry_period: 1s
-    - http_client:
-        url: http://bar:4196/somewhere/else
-        retries: 3
-        retry_period: 1s
+        aws_s3:
+          bucket: foos
+          path: ${! uuid_v4() }.json
+    - file:
+        path: ./dead_letters.jsonl
 ```
 
 </TabItem>

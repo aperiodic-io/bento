@@ -4,9 +4,8 @@ pipeline:
 
 processor_resources:
   - label: http_submit
-    http:
-      url: http://nonexistant.foo/
-      verb: POST
+    sleep:
+      duration: 1h # never reached: the test mocks it
 
 tests:
   - name: test_case
