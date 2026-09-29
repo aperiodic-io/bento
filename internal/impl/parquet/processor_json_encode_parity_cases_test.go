@@ -207,7 +207,7 @@ func randomRow(r *rand.Rand) parityInput {
 func TestJSONParquetParityRandomBatches(t *testing.T) {
 	r := rand.New(rand.NewPCG(1, 2))
 	rows, inputs, files := 0, 0, 0
-	for i := 0; i < 300; i++ {
+	for range 300 {
 		in := make([]parityInput, 1+r.IntN(400))
 		for j := range in {
 			in[j] = randomRow(r)
@@ -241,7 +241,7 @@ func TestJSONParquetParityWithoutPartitionOrNaN(t *testing.T) {
 	s := archiveSchema
 	s.partition, s.legacyPartition, s.nanForNull = "", "", false
 	r := rand.New(rand.NewPCG(5, 6))
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		in := make([]parityInput, 1+r.IntN(200))
 		for j := range in {
 			in[j] = randomRow(r)
@@ -262,7 +262,7 @@ func FuzzJSONParquetParity(f *testing.F) {
 	f.Fuzz(func(t *testing.T, body []byte, topic string) {
 		// newline-separated messages, so the fuzzer also varies batches
 		var in []parityInput
-		for _, line := range strings.Split(string(body), "\n") {
+		for line := range strings.SplitSeq(string(body), "\n") {
 			in = append(in, parityInput{topic: topic, body: []byte(line)})
 		}
 		requireParity(t, archiveSchema, in)

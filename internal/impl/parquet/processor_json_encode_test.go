@@ -83,9 +83,9 @@ schema:
 
 	out, err := e.ProcessBatch(context.Background(), service.MessageBatch{
 		service.NewMessage([]byte(`{"id":1,"v":null}`)),
-		service.NewMessage([]byte(`{"v":2}`)),      // missing id
-		service.NewMessage([]byte(`{"id":1.5}`)),   // not an integer
-		service.NewMessage([]byte(`not json`)),     // not JSON
+		service.NewMessage([]byte(`{"v":2}`)),    // missing id
+		service.NewMessage([]byte(`{"id":1.5}`)), // not an integer
+		service.NewMessage([]byte(`not json`)),   // not JSON
 		service.NewMessage([]byte(`{"id":2,"v":3}`)),
 	})
 	require.NoError(t, err)

@@ -122,7 +122,7 @@ func (s paritySchema) legacyMapping() string {
 func (s paritySchema) legacyProcessors() string {
 	var b strings.Builder
 	b.WriteString("pipeline:\n  processors:\n    - mapping: |\n")
-	for _, l := range strings.Split(s.legacyMapping(), "\n") {
+	for l := range strings.SplitSeq(s.legacyMapping(), "\n") {
 		b.WriteString("        " + l + "\n")
 	}
 	b.WriteString(`    - catch:
@@ -173,7 +173,7 @@ func startParityStream(tb testing.TB, processors string) *parityStream {
 	body := strings.TrimPrefix(processors, "pipeline:\n  processors:\n")
 	for _, item := range strings.Split("\n"+body, "\n    - ")[1:] {
 		var lines []string
-		for _, l := range strings.Split(item, "\n") {
+		for l := range strings.SplitSeq(item, "\n") {
 			lines = append(lines, strings.TrimPrefix(l, "      "))
 		}
 		require.NoError(tb, b.AddProcessorYAML(strings.Join(lines, "\n")), item)
