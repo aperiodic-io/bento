@@ -108,7 +108,7 @@ output:
               - { name: close, type: DOUBLE }
               - { name: volume, type: DOUBLE, optional: true }
             columns:
-              - { name: exchange, value: '${! @kafka_topic.split(".").index(2) }', cache: true }
+              - { name: exchange, value: '${! @kafka_topic.split(".").index(2) }', cache_by: [ kafka_topic ] }
             partition:
               path: 'exchange={exchange}/{time|year=2006/month=01/day=02}'
               time_unit: us
@@ -213,13 +213,20 @@ This field supports [interpolation functions](/docs/configuration/interpolation#
 
 Type: `string`  
 
-### `columns[].cache`
+### `columns[].cache_by`
 
-Evaluate the value once per batch for each distinct combination of the metadata fields it reads, rather than for every message. The value must depend on nothing but those fields: one that reads a message field or the whole of the metadata is rejected, but a function that reads the message without naming a field, such as `content()`, or that differs from call to call, such as `now()`, `uuid_v4()` or `count()`, cannot be told apart and would be evaluated once per batch. A message whose field holds anything but a string is evaluated on its own.
+The metadata fields the value depends on. When set, the value is evaluated once per batch for each distinct combination of these fields' values, rather than for every message, and messages that share them share it: the value must depend on nothing else. A value found to read a message field, the whole of the metadata, or a metadata field not listed is rejected, but not everything can be found: what a function or method called with a non-literal argument reads, what a lambda reads, what a function that reads the message without naming a field reads (`content()`), and a function that differs from call to call (`now()`, `uuid_v4()`, `count()`). A message whose listed field holds anything but a string is evaluated on its own.
 
 
-Type: `bool`  
-Default: `false`  
+Type: `array`  
+Default: `[]`  
+
+```yml
+# Examples
+
+cache_by:
+  - kafka_topic
+```
 
 ### `nan_for_null`
 

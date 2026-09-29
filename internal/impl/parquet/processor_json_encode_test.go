@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sync/atomic"
 	"testing"
 
 	"github.com/parquet-go/parquet-go"
@@ -41,9 +42,11 @@ func TestJSONParquetEncodeRejectsWhatItCannotWrite(t *testing.T) {
 		"empty time layout":       "schema: [ { name: a, type: INT64 } ]\npartition: { path: 'x={a|}' }",
 		"time of interpolated":    "schema: [ { name: a, type: UTF8 } ]\ncolumns: [ { name: a, value: x } ]\npartition: { path: '{a|2006}' }",
 		"unknown time unit":       "schema: [ { name: a, type: INT64 } ]\npartition: { path: '{a|2006}', time_unit: days }",
-		"cache of a field":        "schema: [ { name: a, type: UTF8 } ]\ncolumns: [ { name: a, value: '${! this.b }', cache: true } ]",
-		"cache of all metadata":   "schema: [ { name: a, type: UTF8 } ]\ncolumns: [ { name: a, value: '${! @ }', cache: true } ]",
-		"cache of meta and field": "schema: [ { name: a, type: UTF8 } ]\ncolumns: [ { name: a, value: '${! @t }-${! this.b }', cache: true } ]",
+		"cache of a field":        "schema: [ { name: a, type: UTF8 } ]\ncolumns: [ { name: a, value: '${! this.b }', cache_by: [ t ] } ]",
+		"cache of all metadata":   "schema: [ { name: a, type: UTF8 } ]\ncolumns: [ { name: a, value: '${! @ }', cache_by: [ t ] } ]",
+		"cache of meta and field": "schema: [ { name: a, type: UTF8 } ]\ncolumns: [ { name: a, value: '${! @t }-${! this.b }', cache_by: [ t ] } ]",
+		"cache by too few":        "schema: [ { name: a, type: UTF8 } ]\ncolumns: [ { name: a, value: '${! @t }-${! @u }', cache_by: [ t ] } ]",
+		"cache of dynamic arg":    "schema: [ { name: a, type: UTF8 } ]\ncolumns: [ { name: a, value: '${! @t.trim_prefix(@p) }', cache_by: [ t ] } ]",
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := newTestJSONEncoder(t, conf)
@@ -187,12 +190,12 @@ func TestJSONParquetEncodeOptionalStringIsNull(t *testing.T) {
 func TestJSONParquetEncodeCachedColumn(t *testing.T) {
 	// count() reads no metadata, so a cached value holding it shows how often
 	// the value is evaluated: once a batch for each topic, rather than for each
-	// message.
-	values := func(cache bool) []string {
+	// message. Its counters live for the process, so each run takes new ones.
+	values := func(cacheBy string) []string {
 		e, err := newTestJSONEncoder(t, fmt.Sprintf(`
 schema: [ { name: a, type: UTF8 }, { name: n, type: INT64 } ]
-columns: [ { name: a, value: '${! @topic }-${! count("jpe_cached_%v") }', cache: %v } ]
-`, cache, cache))
+columns: [ { name: a, value: '${! @topic }-${! count("%v") }', cache_by: [ %v ] } ]
+`, uniqueCounter(), cacheBy))
 		require.NoError(t, err)
 		var got []string
 		for range 2 {
@@ -202,25 +205,19 @@ columns: [ { name: a, value: '${! @topic }-${! count("jpe_cached_%v") }', cache:
 				m.MetaSetMut("topic", topic)
 				batch = append(batch, m)
 			}
-			out, err := e.ProcessBatch(context.Background(), batch)
-			require.NoError(t, err)
-			data, err := out[0][0].AsBytes()
-			require.NoError(t, err)
-			for _, row := range readRows(t, data) {
-				got = append(got, string(row[0].ByteArray()))
-			}
+			got = append(got, encodedColumn(t, e, batch)...)
 		}
 		return got
 	}
-	assert.Equal(t, []string{"x-1", "x-2", "y-3", "x-4", "x-5", "x-6", "y-7", "x-8"}, values(false))
-	assert.Equal(t, []string{"x-1", "x-1", "y-2", "x-1", "x-3", "x-3", "y-4", "x-3"}, values(true))
+	assert.Equal(t, []string{"x-1", "x-2", "y-3", "x-4", "x-5", "x-6", "y-7", "x-8"}, values(""))
+	assert.Equal(t, []string{"x-1", "x-1", "y-2", "x-1", "x-3", "x-3", "y-4", "x-3"}, values("topic"))
 
 	// a topic that is not a string is not cached, since it could print as a
 	// string does yet read differently
-	e, err := newTestJSONEncoder(t, `
+	e, err := newTestJSONEncoder(t, fmt.Sprintf(`
 schema: [ { name: a, type: UTF8 }, { name: n, type: INT64 } ]
-columns: [ { name: a, value: '${! @topic }-${! count("jpe_cached_typed") }', cache: true } ]
-`)
+columns: [ { name: a, value: '${! @topic }-${! count("%v") }', cache_by: [ topic ] } ]
+`, uniqueCounter()))
 	require.NoError(t, err)
 	var batch service.MessageBatch
 	for _, topic := range []any{"1", 1, 1} {
@@ -228,15 +225,48 @@ columns: [ { name: a, value: '${! @topic }-${! count("jpe_cached_typed") }', cac
 		m.MetaSetMut("topic", topic)
 		batch = append(batch, m)
 	}
+	assert.Equal(t, []string{"1-1", "1-2", "1-3"}, encodedColumn(t, e, batch))
+}
+
+func TestJSONParquetEncodeCachedByEveryField(t *testing.T) {
+	// A method with a non-literal argument reports only its argument's reads,
+	// so the cache is keyed by the fields listed, not by those reported: listed
+	// in full, messages that differ in any of them do not share a value.
+	e, err := newTestJSONEncoder(t, `
+schema: [ { name: a, type: UTF8 }, { name: n, type: INT64 } ]
+columns: [ { name: a, value: '${! @topic.split(@sep).index(1) }', cache_by: [ topic, sep ] } ]
+`)
+	require.NoError(t, err)
+	var batch service.MessageBatch
+	for _, meta := range [][2]string{{"a.binance", "."}, {"a.okx", "."}, {"a.okx", "."}, {"a-bybit", "-"}, {"a.bybit", "-"}} {
+		m := service.NewMessage([]byte(`{"n":1}`))
+		m.MetaSetMut("topic", meta[0])
+		m.MetaSetMut("sep", meta[1])
+		batch = append(batch, m)
+	}
+	assert.Equal(t, []string{"binance", "okx", "okx", "bybit"}, encodedColumn(t, e, batch), "the last topic has no '-' to split on, and is dropped")
+}
+
+var counterSeq atomic.Int64
+
+// uniqueCounter names a Bloblang count() counter no other run has used.
+func uniqueCounter() string {
+	return fmt.Sprintf("jpe_test_%d", counterSeq.Add(1))
+}
+
+// encodedColumn encodes batch into one file and returns its first column.
+func encodedColumn(t *testing.T, e *jsonParquetEncoder, batch service.MessageBatch) []string {
+	t.Helper()
 	out, err := e.ProcessBatch(context.Background(), batch)
 	require.NoError(t, err)
+	require.Len(t, out[0], 1)
 	data, err := out[0][0].AsBytes()
 	require.NoError(t, err)
 	var got []string
 	for _, row := range readRows(t, data) {
 		got = append(got, string(row[0].ByteArray()))
 	}
-	assert.Equal(t, []string{"1-1", "1-2", "1-3"}, got)
+	return got
 }
 
 func TestJSONParquetEncodeCountsFilesAndDrops(t *testing.T) {

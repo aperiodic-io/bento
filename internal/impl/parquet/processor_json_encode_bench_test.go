@@ -5,7 +5,6 @@ import (
 	"math/rand/v2"
 	"runtime"
 	"runtime/metrics"
-	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -91,12 +90,7 @@ func BenchmarkJSONParquetHeldBatch(b *testing.B) {
 
 // cachedArchiveSchema is archiveSchema with its interpolated column cached, as
 // an archiver would configure it.
-var cachedArchiveSchema = func() paritySchema {
-	s := archiveSchema
-	s.columns = slices.Clone(s.columns)
-	s.columns[0].cache = true
-	return s
-}()
+var cachedArchiveSchema = archiveSchema.cached()
 
 // fewPartitions is cachedArchiveSchema partitioned as the archiver's example
 // is, by exchange and day: a couple of dozen files a batch rather than hundreds.

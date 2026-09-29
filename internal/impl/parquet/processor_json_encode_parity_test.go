@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -34,7 +35,7 @@ type parityColumn struct {
 	typ      string
 	optional bool
 	fromMeta string // the Bloblang of an interpolated column, "" to read the field
-	cache    bool   // json_parquet_encode caches fromMeta
+	cacheBy  string // the metadata field json_parquet_encode caches fromMeta by, "" for none
 }
 
 type paritySchema struct {
@@ -66,6 +67,19 @@ var archiveSchema = paritySchema{
 	partition:       "timestamp={timestamp_type}/{interval}/exchange={exchange}/{time|year=2006/month=01/day=02}",
 	legacyPartition: `"timestamp=%s/%s/exchange=%s/%s".format(this.timestamp_type, this.interval, root.exchange, (this.time / 1000000).ts_format("year=2006/month=01/day=02", "UTC"))`,
 	nanForNull:      true,
+}
+
+// cached returns s with its interpolated column cached by kafka_topic, which
+// is all it reads.
+func (s paritySchema) cached() paritySchema {
+	s.columns = slices.Clone(s.columns)
+	for i := range s.columns {
+		if s.columns[i].fromMeta != "" {
+			s.columns[i].cacheBy = "kafka_topic"
+			return s
+		}
+	}
+	panic("the schema has no interpolated column to cache")
 }
 
 func (s paritySchema) schemaYAML() string {
@@ -146,7 +160,11 @@ func (s paritySchema) newProcessors() string {
 	b.WriteString("        columns:\n")
 	for _, c := range s.columns {
 		if c.fromMeta != "" {
-			fmt.Fprintf(&b, "          - { name: %s, value: '${! %s }', cache: %v }\n", c.name, c.fromMeta, c.cache)
+			fmt.Fprintf(&b, "          - { name: %s, value: '${! %s }'", c.name, c.fromMeta)
+			if c.cacheBy != "" {
+				fmt.Fprintf(&b, ", cache_by: [ %s ]", c.cacheBy)
+			}
+			b.WriteString(" }\n")
 		}
 	}
 	if s.partition != "" {

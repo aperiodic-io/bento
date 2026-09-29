@@ -70,12 +70,14 @@ func (e *Expression) resolve(index int, msg Message, escaped bool) ([]byte, erro
 func (e *Expression) QueryTargets(ctx query.TargetsContext) []query.TargetPath {
 	var paths []query.TargetPath
 	for _, r := range e.resolvers {
-		if q, ok := r.(interface {
-			QueryTargets(query.TargetsContext) (query.TargetsContext, []query.TargetPath)
-		}); ok {
-			_, p := q.QueryTargets(ctx)
-			paths = append(paths, p...)
+		var p []query.TargetPath
+		switch q := r.(type) {
+		case *QueryResolver:
+			_, p = q.QueryTargets(ctx)
+		case QueryResolver:
+			_, p = q.QueryTargets(ctx)
 		}
+		paths = append(paths, p...)
 	}
 	return paths
 }

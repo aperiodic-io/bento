@@ -46,19 +46,6 @@ func (i *InterpolatedString) Static() (string, bool) {
 	return s, true
 }
 
-type interpolatedStringUnwrapper struct {
-	expr *field.Expression
-}
-
-func (u interpolatedStringUnwrapper) Unwrap() *field.Expression {
-	return u.expr
-}
-
-// XUnwrapper is for internal use only, do not use this.
-func (i *InterpolatedString) XUnwrapper() any {
-	return interpolatedStringUnwrapper{expr: i.expr}
-}
-
 // TryString resolves the interpolated field for a given message as a string,
 // returns an error if any interpolation functions fail.
 func (i *InterpolatedString) TryString(m *Message) (string, error) {

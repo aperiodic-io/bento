@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"math/rand/v2"
-	"slices"
 	"strings"
 	"testing"
 
@@ -166,10 +165,7 @@ func TestJSONParquetParityMetadata(t *testing.T) {
 func TestJSONParquetParityCachedColumn(t *testing.T) {
 	// the interpolated column evaluated once per topic a batch, over topics
 	// that differ, repeat, and are absent, within one batch and across batches
-	s := archiveSchema
-	s.columns = slices.Clone(s.columns)
-	s.columns[0].cache = true
-	require.NotEmpty(t, s.columns[0].fromMeta)
+	s := archiveSchema.cached()
 	body := rowWith("", "")
 	var in []parityInput
 	for _, topic := range []string{
