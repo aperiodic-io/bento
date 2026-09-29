@@ -870,9 +870,15 @@ func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.Mes
 	// reset writer writes the bytes a new one would, save for a page of one
 	// empty string (see needsNewWriter), so a file that could have one takes a
 	// new writer.
+	//
+	// The files are written into one buffer, grown once to the largest of them,
+	// and each is copied out at its size: a buffer of its own would grow by
+	// doubling from nothing, and hand its message what doubling left unused.
+	// The last file keeps the buffer when that leaves little unused.
+	var buf bytes.Buffer
 	out := make(service.MessageBatch, 0, len(groups))
-	for _, g := range groups {
-		var buf bytes.Buffer
+	for gi, g := range groups {
+		buf.Reset()
 		w, _ := e.writers.Get().(*parquet.GenericWriter[any])
 		if w == nil || e.newWriters || e.needsNewWriter(g) {
 			w = parquet.NewGenericWriter[any](&buf, e.schema, e.codec, jpeNoWriteBuffer)
@@ -887,7 +893,11 @@ func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.Mes
 		e.writers.Put(w)
 		g.rows, g.arena = nil, jpeArena{}
 		m := g.first.Copy()
-		m.SetBytes(buf.Bytes())
+		if data := buf.Bytes(); gi == len(groups)-1 && cap(data)-len(data) <= len(data)/4 {
+			m.SetBytes(data)
+		} else {
+			m.SetBytes(bytes.Clone(data))
+		}
 		if e.partition != nil {
 			m.MetaSetMut(e.partitionMeta, g.key)
 		}
