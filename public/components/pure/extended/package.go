@@ -12,5 +12,4 @@ import (
 	// Import pure but larger packages.
 	_ "github.com/warpstreamlabs/bento/internal/impl/parquet"
 	_ "github.com/warpstreamlabs/bento/internal/impl/protobuf"
-	_ "github.com/warpstreamlabs/bento/internal/impl/pure/extended"
 )

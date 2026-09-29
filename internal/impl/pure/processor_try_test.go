@@ -149,8 +149,7 @@ try:
 func TestTryFailJSON(t *testing.T) {
 	conf, err := testutil.ProcessorFromYAML(`
 try:
-  - jmespath:
-      query: 'foo'
+  - mapping: 'root = this.foo'
   - bloblang: 'root = if batch_index() == 0 { content().encode("base64") }'
 `)
 	require.NoError(t, err)

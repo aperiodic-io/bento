@@ -333,7 +333,7 @@ func init() {
 			if maxInFlight, err = conf.FieldMaxInFlight(); err != nil {
 				return
 			}
-			if batchPolicy, err = conf.FieldBatchPolicy(koFieldBatching); err != nil {
+			if batchPolicy, err = conf.FieldBatchPolicy(s3oFieldBatching); err != nil {
 				return
 			}
 			var wConf s3oConfig

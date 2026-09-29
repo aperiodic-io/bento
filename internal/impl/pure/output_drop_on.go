@@ -30,34 +30,22 @@ func dropOnOutputSpec() *service.ConfigSpec {
 		Summary(`Attempts to write messages to a child output and if the write fails for one of a list of configurable reasons the message is dropped (acked) instead of being reattempted (or nacked).`).
 		Description(`Regular Bento outputs will apply back pressure when downstream services aren't accessible, and Bento retries (or nacks) all messages that fail to be delivered. However, in some circumstances, or for certain output types, we instead might want to relax these mechanisms, which is when this output becomes useful.`).
 		Example(
-			"Dropping failed HTTP requests",
-			"In this example we have a fan_out broker, where we guarantee delivery to our Kafka output, but drop messages if they fail our secondary HTTP client output.",
+			"Dropping failed writes to a secondary output",
+			"In this example we have a fan_out broker, where we guarantee delivery to our primary bucket, but drop messages if they fail our secondary one.",
 			`
 output:
   broker:
     pattern: fan_out
     outputs:
-      - kafka:
-          addresses: [ foobar:6379 ]
-          topic: foo
+      - aws_s3:
+          bucket: primary
+          path: foo/${! uuid_v4() }.json
       - drop_on:
           error: true
           output:
-            http_client:
-              url: http://example.com/foo/messages
-              verb: POST
-`,
-		).
-		Example(
-			"Dropping from outputs that cannot connect",
-			"Most outputs that attempt to establish and long-lived connection will apply back-pressure when the connection is lost. The following example has a websocket output where if it takes longer than 10 seconds to establish a connection, or recover a lost one, pending messages are dropped.",
-			`
-output:
-  drop_on:
-    back_pressure: 10s
-    output:
-      websocket:
-        url: ws://example.com/foo/messages
+            aws_s3:
+              bucket: secondary
+              path: foo/${! uuid_v4() }.json
 `,
 		).
 		Fields(

@@ -117,8 +117,9 @@ sequence:
     iterations: 1
     merge_strategy: array
   inputs:
-    - csv:
+    - file:
         paths: [ "%v", "%v" ]
+        scanner: { csv: {} }
     - file:
         paths: [ "%v" ]
 `,
@@ -239,7 +240,8 @@ sequence:
     iterations: 1
     merge_strategy: %v
   inputs:
-  - csv:
+  - file:
+      scanner: { csv: {} }
       paths:
 `,
 				shardType,
@@ -253,8 +255,9 @@ sequence:
 			}
 
 			conf += fmt.Sprintf(`
-  - csv:
+  - file:
       paths: [ "%v" ]
+      scanner: { csv: {} }
 `, filepath.Join(tmpDir, "final.csv"))
 
 			t.Log(conf)
@@ -340,8 +343,9 @@ sequence:
     iterations: 5
     merge_strategy: array
   inputs:
-    - csv:
+    - file:
         paths: [ "%v" ]
+        scanner: { csv: {} }
     - file:
         codec: lines
         paths: [ "%v" ]

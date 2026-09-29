@@ -130,12 +130,15 @@ output:
   broker:
     pattern: round_robin
     outputs:
-      - http_client:
-          url: http://api1.example.com/data
-      - http_client:
-          url: http://api2.example.com/data
-      - http_client:
-          url: http://api3.example.com/data
+      - aws_s3:
+          bucket: archive-1
+          path: data/${! uuid_v4() }.json
+      - aws_s3:
+          bucket: archive-2
+          path: data/${! uuid_v4() }.json
+      - aws_s3:
+          bucket: archive-3
+          path: data/${! uuid_v4() }.json
 `,
 	)
 }

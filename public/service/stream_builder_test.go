@@ -414,7 +414,7 @@ type: memory`))
 	require.NoError(t, b.AddInputYAML(`type: generate`))
 	require.NoError(t, b.AddOutputYAML(`type: drop`))
 	require.NoError(t, b.AddProcessorYAML(`type: bloblang`))
-	require.NoError(t, b.AddProcessorYAML(`type: jmespath`))
+	require.NoError(t, b.AddProcessorYAML(`type: sleep`))
 	require.NoError(t, b.AddRateLimitYAML(`label: foorl
 type: local`))
 	require.NoError(t, b.SetMetricsYAML(`type: none`))
@@ -438,7 +438,7 @@ type: local`))
           bloblang: ""`,
 		`
         - label: ""
-          jmespath: {}`,
+          sleep: {}`,
 		`output:
     label: ""
     drop:`,
@@ -473,7 +473,7 @@ processor_resources:
   - label: fooproc1
     type: bloblang
   - label: fooproc2
-    type: jmespath
+    type: sleep
 
 input_resources:
   - label: fooinput
@@ -499,7 +499,7 @@ output_resources:
     - label: fooproc1
       bloblang:`,
 		`    - label: fooproc2
-      jmespath:`,
+      sleep:`,
 		`input_resources:
     - label: fooinput
       generate:`,
@@ -866,22 +866,20 @@ mapping: ""`,
 			name: "nested components",
 			input: `
 input:
-  dynamic:
+  broker:
     inputs:
-      foo:
-        file:
+      - file:
           paths: [ aaa.txt ]
 `,
 			output: []walkedComponent{
 				{
 					typeStr: "input",
-					name:    "dynamic",
+					name:    "broker",
 					conf: `label: ""
-dynamic:
+broker:
     inputs:
-        foo:
-            file:
-                paths: [aaa.txt]`,
+        - file:
+            paths: [aaa.txt]`,
 				},
 				{
 					typeStr: "input",
@@ -948,7 +946,7 @@ pipeline:
   threads: 5
   processors:
     - type: bloblang
-    - type: jmespath
+    - type: sleep
 
 output:
   drop: {}
@@ -971,7 +969,7 @@ output:
           bloblang: ""`,
 		`
         - label: ""
-          jmespath: {}`,
+          sleep: {}`,
 		`output:
     label: ""
     drop:`,

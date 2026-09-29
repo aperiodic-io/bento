@@ -2,12 +2,8 @@ package kafka
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
-	"github.com/IBM/sarama"
-
-	"github.com/warpstreamlabs/bento/internal/impl/aws/config"
 	"github.com/warpstreamlabs/bento/public/service"
 
 	"github.com/twmb/franz-go/pkg/sasl"
@@ -18,33 +14,6 @@ import (
 	"golang.org/x/oauth2/clientcredentials"
 )
 
-const kafkaSaramaOAuth2Doc = `
-
-### Sasl Oauthbearer Config Options
-
-There are currently 3 ways to configure SASL OAUTH2: 
-
- - Static Token with ` + "`sasl.access_token`" + `
- - Token Cache with ` + "`sasl.token_cache` & `sasl.token_key`" + `
- - Fetching Tokens from an Auth service with the` + "`sasl.oauth2` fields`" + `
-
-
-`
-
-func notImportedAWSFn(c *service.ParsedConfig) (sasl.Mechanism, error) {
-	return nil, errors.New("unable to configure AWS SASL as this binary does not import components/aws")
-}
-
-func notImportedAWSFnSarama(c *service.ParsedConfig) (sarama.AccessTokenProvider, error) {
-	return nil, errors.New("unable to configure AWS SASL as this binary does not import components/aws")
-}
-
-// AWSSASLFromConfigFn is populated with the child `aws` package when imported.
-var AWSSASLFromConfigFn = notImportedAWSFn
-
-// AWSSASLFromConfigFnSarama is populated with the child `aws` package when imported.
-var SaramaTokenProviderFromConfigFn = notImportedAWSFnSarama
-
 func saslField() *service.ConfigField {
 	return service.NewObjectListField("sasl",
 		service.NewStringAnnotatedEnumField("mechanism", map[string]string{
@@ -53,8 +22,6 @@ func saslField() *service.ConfigField {
 			"OAUTHBEARER":   "OAuth Bearer based authentication.",
 			"SCRAM-SHA-256": "SCRAM based authentication as specified in RFC5802.",
 			"SCRAM-SHA-512": "SCRAM based authentication as specified in RFC5802.",
-			"AWS_MSK_IAM":   "AWS IAM based authentication as specified by the 'aws-msk-iam-auth' java library.",
-			"GSSAPI":        "GSSAPI / Kerberos based authentication.",
 		}).
 			Description("The SASL mechanism to use."),
 		service.NewStringField("username").
@@ -93,28 +60,6 @@ func saslField() *service.ConfigField {
 		service.NewStringMapField("extensions").
 			Description("Key/value pairs to add to OAUTHBEARER authentication requests.").
 			Optional(),
-		service.NewObjectField("aws", config.SessionFields()...).
-			Description("Contains AWS specific fields for when the `mechanism` is set to `AWS_MSK_IAM`.").
-			Optional(),
-		service.NewStringField("kerberos_config_path").
-			Description("The path to a kerberos configuration file (krb5.conf). Used when mechanism is set to `GSSAPI`.").
-			Default("/etc/krb5.conf"),
-		service.NewStringField("keytab_path").
-			Description("The path to a keytab file to use for authentication with the kerberos client.").
-			Default(""),
-		service.NewStringField("principal").
-			Description("The principal to use for kerberos authentication, e.g. `kafka_client/host.example.com`.").
-			Default(""),
-		service.NewStringField("realm").
-			Description("The realm to use for kerberos authentication.").
-			Default(""),
-		service.NewStringField("service_name").
-			Description("The service name to use when constructing a service ticket with the kerberos client, e.g. `kafka` (default).").
-			Default("kafka"),
-		service.NewBoolField("disable_pafx_fast").
-			Description("Controls whether to use PA_FX_FAST in AS_REQ (pre-authentication fast).").
-			Default(false).
-			Advanced(),
 	).
 		Description("Specify one or more methods of SASL authentication. SASL is tried in order; if the broker supports the first mechanism, all connections will use that mechanism. If the first mechanism fails, the client will pick the first supported mechanism. If the broker does not support any client mechanisms, connections will fail.").
 		Advanced().Optional().
@@ -124,18 +69,6 @@ func saslField() *service.ConfigField {
 					"mechanism": "SCRAM-SHA-512",
 					"username":  "foo",
 					"password":  "bar",
-				},
-			},
-		).
-		Example(
-			[]any{
-				map[string]any{
-					"mechanism":            "GSSAPI",
-					"kerberos_config_path": "/etc/krb5.conf",
-					"keytab_path":          "/etc/security/keytabs/kafka.keytab",
-					"principal":            "kafka_client/host.example.com",
-					"realm":                "EXAMPLE.COM",
-					"service_name":         "kafka",
 				},
 			},
 		)
@@ -170,12 +103,6 @@ func saslMechanismsFromConfig(c *service.ParsedConfig) ([]sasl.Mechanism, error)
 				mechanisms = append(mechanisms, mechanism)
 			case "SCRAM-SHA-512":
 				mechanism, err = scram512SaslFromConfig(mConf)
-				mechanisms = append(mechanisms, mechanism)
-			case "AWS_MSK_IAM":
-				mechanism, err = AWSSASLFromConfigFn(mConf)
-				mechanisms = append(mechanisms, mechanism)
-			case "GSSAPI":
-				mechanism, err = kerberosSaslFromConfig(mConf)
 				mechanisms = append(mechanisms, mechanism)
 			default:
 				err = fmt.Errorf("unknown mechanism: %v", mechStr)
@@ -317,307 +244,4 @@ func scram512SaslFromConfig(c *service.ParsedConfig) (sasl.Mechanism, error) {
 			Pass: password,
 		}, nil
 	}), nil
-}
-
-//------------------------------------------------------------------------------
-
-// SASL specific error types.
-var (
-	ErrUnsupportedSASLMechanism = errors.New("unsupported SASL mechanism")
-)
-
-const (
-	saramaFieldSASL            = "sasl"
-	saramaFieldSASLMechanism   = "mechanism"
-	saramaFieldSASLUser        = "user"
-	saramaFieldSASLPassword    = "password"
-	saramaFieldSASLAccessToken = "access_token"
-	saramaFieldSASLTokenCache  = "token_cache"
-	saramaFieldSASLTokenKey    = "token_key"
-	saramaFieldSASLOAuth2      = "oauth2"
-	saramaFieldSASLExtensions  = "extensions"
-	saramaFieldSASLAws         = "aws"
-)
-
-// SaramaSASLField returns a field spec definition for SASL within the sarama
-// components.
-func SaramaSASLField() *service.ConfigField {
-	return service.NewObjectField(saramaFieldSASL,
-		service.NewStringAnnotatedEnumField(saramaFieldSASLMechanism,
-			map[string]string{
-				"none":          "Default, no SASL authentication.",
-				"PLAIN":         "Plain text authentication. NOTE: When using plain text auth it is extremely likely that you'll also need to [enable TLS](#tlsenabled).",
-				"OAUTHBEARER":   "OAuth Bearer based authentication.",
-				"SCRAM-SHA-256": "Authentication using the SCRAM-SHA-256 mechanism.",
-				"SCRAM-SHA-512": "Authentication using the SCRAM-SHA-512 mechanism.",
-				"AWS_MSK_IAM":   "AWS IAM based authentication using MSK sasl signer.",
-			}).
-			Description("The SASL authentication mechanism, if left empty SASL authentication is not used.").
-			Default("none"),
-		service.NewStringField(saramaFieldSASLUser).
-			Description("A PLAIN username. It is recommended that you use environment variables to populate this field.").
-			Example("${USER}").
-			Default(""),
-		service.NewStringField(saramaFieldSASLPassword).
-			Description("A PLAIN password. It is recommended that you use environment variables to populate this field.").
-			Example("${PASSWORD}").
-			Default("").
-			Secret(),
-		service.NewStringField(saramaFieldSASLAccessToken).
-			Description("A static OAUTHBEARER access token").
-			Default(""),
-		service.NewStringField(saramaFieldSASLTokenCache).
-			Description("Instead of using a static `access_token` allows you to query a [`cache`](/docs/components/caches/about) resource to fetch OAUTHBEARER tokens from").
-			Default(""),
-		service.NewStringField(saramaFieldSASLTokenKey).
-			Description("Required when using a `token_cache`, the key to query the cache with for tokens.").
-			Default(""),
-		service.NewObjectField(saramaFieldSASLOAuth2,
-			service.NewBoolField("enabled").
-				Description("Whether to use OAuth version 2 in requests.").
-				Default(false),
-			service.NewStringField("client_key").
-				Description("A value used to identify the client to the token provider.").
-				Default(""),
-			service.NewStringField("client_secret").
-				Description("A secret used to establish ownership of the client key.").
-				Default("").Secret(),
-			service.NewURLField("token_url").
-				Description("The URL of the token provider.").
-				Default(""),
-			service.NewStringListField("scopes").
-				Description("A list of optional requested permissions.").
-				Default([]any{}).
-				Advanced(),
-			service.NewAnyMapField("endpoint_params").
-				Description("A list of optional endpoint parameters, values should be arrays of strings.").
-				Advanced().
-				Optional(),
-			service.NewAnyMapField(saramaFieldSASLExtensions).
-				Description("A list of optional endpoint parameters, values should be arrays of strings.").
-				Advanced().
-				Optional(),
-		).
-			Description("Allows you to specify open authentication via OAuth version 2 using the client credentials token flow.").
-			Optional().Version("1.18.0").Advanced(),
-		service.NewObjectField(saramaFieldSASLAws, config.SessionFields()...).
-			Description("Contains AWS specific fields for when the `mechanism` is set to `AWS_MSK_IAM`.").
-			Optional(),
-	).
-		Description("Enables SASL authentication.").
-		Optional().
-		Advanced()
-}
-
-// ApplySaramaSASLFromParsed applies a parsed config containing a SASL field to
-// a sarama.Config.
-func ApplySaramaSASLFromParsed(pConf *service.ParsedConfig, mgr *service.Resources, conf *sarama.Config) error {
-	pConf = pConf.Namespace(saramaFieldSASL)
-
-	mechanism, err := pConf.FieldString(saramaFieldSASLMechanism)
-	if err != nil {
-		return err
-	}
-
-	username, err := pConf.FieldString(saramaFieldSASLUser)
-	if err != nil {
-		return nil
-	}
-
-	password, err := pConf.FieldString(saramaFieldSASLPassword)
-	if err != nil {
-		return nil
-	}
-
-	accessToken, err := pConf.FieldString(saramaFieldSASLAccessToken)
-	if err != nil {
-		return nil
-	}
-
-	tokenCache, err := pConf.FieldString(saramaFieldSASLTokenCache)
-	if err != nil {
-		return nil
-	}
-
-	tokenKey, err := pConf.FieldString(saramaFieldSASLTokenKey)
-	if err != nil {
-		return nil
-	}
-
-	switch mechanism {
-	case sarama.SASLTypeOAuth:
-		var tp sarama.AccessTokenProvider
-		var err error
-
-		if pConf.Contains(saramaFieldSASLOAuth2) {
-			if enabled, _ := pConf.FieldBool(saramaFieldSASLOAuth2, "enabled"); enabled {
-				if tp, err = newOAuth2AccessTokenProvider(pConf.Namespace(saramaFieldSASLOAuth2)); err != nil {
-					return err
-				}
-			} else {
-				if tokenCache != "" {
-					if tp, err = newCacheAccessTokenProvider(mgr, tokenCache, tokenKey); err != nil {
-						return err
-					}
-				} else {
-					if tp, err = newStaticAccessTokenProvider(accessToken); err != nil {
-						return err
-					}
-				}
-			}
-		}
-		conf.Net.SASL.TokenProvider = tp
-		conf.Net.SASL.Mechanism = sarama.SASLMechanism(mechanism)
-	case sarama.SASLTypeSCRAMSHA256:
-		conf.Net.SASL.SCRAMClientGeneratorFunc = func() sarama.SCRAMClient {
-			return &XDGSCRAMClient{HashGeneratorFcn: SHA256}
-		}
-		conf.Net.SASL.User = username
-		conf.Net.SASL.Password = password
-		conf.Net.SASL.Mechanism = sarama.SASLMechanism(mechanism)
-	case sarama.SASLTypeSCRAMSHA512:
-		conf.Net.SASL.SCRAMClientGeneratorFunc = func() sarama.SCRAMClient {
-			return &XDGSCRAMClient{HashGeneratorFcn: SHA512}
-		}
-		conf.Net.SASL.User = username
-		conf.Net.SASL.Password = password
-		conf.Net.SASL.Mechanism = sarama.SASLMechanism(mechanism)
-	case sarama.SASLTypePlaintext:
-		conf.Net.SASL.User = username
-		conf.Net.SASL.Password = password
-		conf.Net.SASL.Mechanism = sarama.SASLMechanism(mechanism)
-	case "AWS_MSK_IAM":
-		tp, err := SaramaTokenProviderFromConfigFn(pConf)
-		if err != nil {
-			return err
-		}
-		conf.Net.SASL.TokenProvider = tp
-		conf.Net.SASL.Mechanism = sarama.SASLTypeOAuth
-	case "", "none":
-		return nil
-	default:
-		return ErrUnsupportedSASLMechanism
-	}
-
-	conf.Net.SASL.Enable = true
-
-	return nil
-}
-
-//------------------------------------------------------------------------------
-
-// cacheAccessTokenProvider fetches SASL OAUTHBEARER access tokens from a cache.
-type cacheAccessTokenProvider struct {
-	mgr       *service.Resources
-	cacheName string
-	key       string
-}
-
-func newCacheAccessTokenProvider(mgr *service.Resources, cache, key string) (*cacheAccessTokenProvider, error) {
-	if !mgr.HasCache(cache) {
-		return nil, fmt.Errorf("cache resource '%v' was not found", cache)
-	}
-	return &cacheAccessTokenProvider{
-		mgr:       mgr,
-		cacheName: cache,
-		key:       key,
-	}, nil
-}
-
-func (c *cacheAccessTokenProvider) Token() (*sarama.AccessToken, error) {
-	var tok []byte
-	var terr error
-	if err := c.mgr.AccessCache(context.Background(), c.cacheName, func(cache service.Cache) {
-		tok, terr = cache.Get(context.Background(), c.key)
-	}); err != nil {
-		return nil, fmt.Errorf("failed to obtain cache resource '%v': %v", c.cacheName, err)
-	}
-	if terr != nil {
-		return nil, terr
-	}
-	return &sarama.AccessToken{Token: string(tok)}, nil
-}
-
-//------------------------------------------------------------------------------
-
-// staticAccessTokenProvider provides a static SASL OAUTHBEARER access token.
-type staticAccessTokenProvider struct {
-	token string
-}
-
-func newStaticAccessTokenProvider(token string) (*staticAccessTokenProvider, error) {
-	return &staticAccessTokenProvider{token}, nil
-}
-
-func (s *staticAccessTokenProvider) Token() (*sarama.AccessToken, error) {
-	return &sarama.AccessToken{Token: s.token}, nil
-}
-
-//------------------------------------------------------------------------------
-
-type oauth2AccessTokenProvider struct {
-	ts         oauth2.TokenSource
-	extensions map[string]string
-}
-
-func newOAuth2AccessTokenProvider(conf *service.ParsedConfig) (*oauth2AccessTokenProvider, error) {
-	key, err := conf.FieldString("client_key")
-	if err != nil {
-		return nil, err
-	}
-	secret, err := conf.FieldString("client_secret")
-	if err != nil {
-		return nil, err
-	}
-	tokenURL, err := conf.FieldString("token_url")
-	if err != nil {
-		return nil, err
-	}
-	scopes, err := conf.FieldStringList("scopes")
-	if err != nil {
-		return nil, err
-	}
-	endpointParams := map[string][]string{}
-	if conf.Contains("endpoint_params") {
-		params, err := conf.FieldAnyMap("endpoint_params")
-		if err != nil {
-			return nil, err
-		}
-		for k, v := range params {
-			if endpointParams[k], err = v.FieldStringList(); err != nil {
-				return nil, err
-			}
-		}
-	}
-
-	var extensions map[string]string
-	if conf.Contains("extensions") {
-		if extensions, err = conf.FieldStringMap(saramaFieldSASLExtensions); err != nil {
-			return nil, err
-		}
-	}
-
-	oauthConf := &clientcredentials.Config{
-		ClientID:       key,
-		ClientSecret:   secret,
-		TokenURL:       tokenURL,
-		Scopes:         scopes,
-		EndpointParams: endpointParams,
-	}
-
-	return &oauth2AccessTokenProvider{
-		ts:         oauth2.ReuseTokenSource(nil, oauthConf.TokenSource(context.Background())),
-		extensions: extensions,
-	}, nil
-}
-
-func (o *oauth2AccessTokenProvider) Token() (*sarama.AccessToken, error) {
-	tok, err := o.ts.Token()
-	if err != nil {
-		return nil, err
-	}
-	return &sarama.AccessToken{
-		Token:      tok.AccessToken,
-		Extensions: o.extensions,
-	}, nil
 }

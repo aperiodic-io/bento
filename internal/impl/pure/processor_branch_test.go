@@ -17,6 +17,17 @@ import (
 	_ "github.com/warpstreamlabs/bento/internal/impl/pure"
 )
 
+type mockMsg struct {
+	content string
+	meta    map[string]string
+	err     error
+}
+
+func (m mockMsg) withErr(err error) mockMsg {
+	m.err = err
+	return m
+}
+
 func TestBranchBasic(t *testing.T) {
 	msg := func(content string, meta ...string) mockMsg {
 		t.Helper()

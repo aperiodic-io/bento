@@ -10,7 +10,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/warpstreamlabs/bento/internal/bloblang/mapping"
-	"github.com/warpstreamlabs/bento/internal/bloblang/query"
 	"github.com/warpstreamlabs/bento/internal/bundle"
 	"github.com/warpstreamlabs/bento/internal/component/interop"
 	"github.com/warpstreamlabs/bento/internal/component/metrics"
@@ -46,23 +45,6 @@ If the `+"`request_map`"+` fails the child processors will not be executed. If t
 ### Conditional Branching
 
 If the root of your request map is set to `+"`deleted()`"+` then the branch processors are skipped for the given message, this allows you to conditionally branch messages.`).
-		Example("HTTP Request", `
-This example strips the request message into an empty body, grabs an HTTP payload, and places the result back into the original message at the path `+"`image.pull_count`"+`:`, `
-pipeline:
-  processors:
-    - branch:
-        request_map: 'root = ""'
-        processors:
-          - http:
-              url: https://hub.docker.com/v2/repositories/library/alpine
-              verb: GET
-              headers:
-                Content-Type: application/json
-        result_map: root.image.pull_count = this.pull_count
-
-# Example input:  {"id":"foo","some":"pre-existing data"}
-# Example output: {"id":"foo","some":"pre-existing data","image":{"pull_count":1234}}
-`).
 		Example("Non Structured Results", `
 When the result of your branch processors is unstructured and you wish to simply set a resulting field to the raw output use the content function to obtain the raw bytes of the resulting message and then coerce it into your value type of choice:`, `
 pipeline:
@@ -78,19 +60,6 @@ pipeline:
 
 # Example input:  {"document":{"id":"foo","content":"hello world"}}
 # Example output: {"document":{"id":"foo","content":"hello world","description":"this is a cool doc"}}
-`).
-		Example("Lambda Function", `
-This example maps a new payload for triggering a lambda function with an ID and username from the original message, and the result of the lambda is discarded, meaning the original message is unchanged.`, `
-pipeline:
-  processors:
-    - branch:
-        request_map: '{"id":this.doc.id,"username":this.user.name}'
-        processors:
-          - aws_lambda:
-              function: trigger_user_update
-
-# Example input: {"doc":{"id":"foo","body":"hello world"},"user":{"name":"fooey"}}
-# Output matches the input, which is unchanged
 `).
 		Example("Conditional Caching", `
 This example caches a document by a message ID only when the type of the document is a foo:`, `
@@ -224,58 +193,6 @@ func newBranchFromParsed(conf *service.ParsedConfig, mgr bundle.NewManagement) (
 }
 
 //------------------------------------------------------------------------------
-
-// TargetsUsed returns a list of paths that this branch depends on. Each path is
-// prefixed by a namespace `metadata` or `path` indicating the source.
-func (b *Branch) targetsUsed() [][]string {
-	if b.requestMap == nil {
-		return nil
-	}
-
-	var paths [][]string
-	_, queryTargets := b.requestMap.QueryTargets(query.TargetsContext{})
-
-pathLoop:
-	for _, p := range queryTargets {
-		path := make([]string, 0, len(p.Path)+1)
-		switch p.Type {
-		case query.TargetValue:
-			path = append(path, "path")
-		case query.TargetMetadata:
-			path = append(path, "metadata")
-		default:
-			continue pathLoop
-		}
-		paths = append(paths, append(path, p.Path...))
-	}
-
-	return paths
-}
-
-// TargetsProvided returns a list of paths that this branch provides.
-func (b *Branch) targetsProvided() [][]string {
-	if b.resultMap == nil {
-		return nil
-	}
-
-	var paths [][]string
-
-pathLoop:
-	for _, p := range b.resultMap.AssignmentTargets() {
-		path := make([]string, 0, len(p.Path)+1)
-		switch p.Type {
-		case mapping.TargetValue:
-			path = append(path, "path")
-		case mapping.TargetMetadata:
-			path = append(path, "metadata")
-		default:
-			continue pathLoop
-		}
-		paths = append(paths, append(path, p.Path...))
-	}
-
-	return paths
-}
 
 //------------------------------------------------------------------------------
 

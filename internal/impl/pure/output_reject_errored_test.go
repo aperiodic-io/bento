@@ -2,11 +2,9 @@ package pure_test
 
 import (
 	"context"
-	"io"
-	"net/http"
-	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -22,33 +20,20 @@ import (
 )
 
 func TestRejectErroredHappy(t *testing.T) {
-	var resMut sync.Mutex
-	results := map[string][]string{} // Maps seen paths to seen data
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-
-		resMut.Lock()
-		defer resMut.Unlock()
-
-		results[r.URL.Path] = append(results[r.URL.Path], string(body))
-	}))
+	dir := t.TempDir()
 
 	conf := parseYAMLOutputConf(t, strings.ReplaceAll(`
 processors:
   - mapping: 'root = content().uppercase()'
 fallback:
   - reject_errored:
-      http_client:
-        url: $URL/a
-        retries: 1
-        retry_period: "1ms"
-  - http_client:
-      url: $URL/dlq
-      retries: 1
-      retry_period: "1ms"
-`, "$URL", server.URL))
+      file:
+        path: $URL/a
+        codec: lines
+  - file:
+      path: $URL/dlq
+      codec: lines
+`, "$URL", dir))
 
 	s, err := bundle.AllOutputs.Init(conf, mock.NewManager())
 	require.NoError(t, err)
@@ -94,7 +79,7 @@ fallback:
 		}
 	}
 
-	resMut.Lock()
+	results := fileResults(t, dir)
 	assert.Equal(t, map[string][]string{
 		"/a": {
 			"TEST A",
@@ -104,37 +89,23 @@ fallback:
 			"TEST E",
 		},
 	}, results)
-	resMut.Unlock()
 }
 
 func TestRejectErroredSad(t *testing.T) {
-	var resMut sync.Mutex
-	results := map[string][]string{} // Maps seen paths to seen data
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-
-		resMut.Lock()
-		defer resMut.Unlock()
-
-		results[r.URL.Path] = append(results[r.URL.Path], string(body))
-	}))
+	dir := t.TempDir()
 
 	conf := parseYAMLOutputConf(t, strings.ReplaceAll(`
 processors:
   - mapping: 'root = if content().contains("nope") { throw("no way") }'
 fallback:
   - reject_errored:
-      http_client:
-        url: $URL/a
-        retries: 1
-        retry_period: "1ms"
-  - http_client:
-      url: $URL/dlq
-      retries: 1
-      retry_period: "1ms"
-`, "$URL", server.URL))
+      file:
+        path: $URL/a
+        codec: lines
+  - file:
+      path: $URL/dlq
+      codec: lines
+`, "$URL", dir))
 
 	s, err := bundle.AllOutputs.Init(conf, mock.NewManager())
 	require.NoError(t, err)
@@ -180,7 +151,7 @@ fallback:
 		}
 	}
 
-	resMut.Lock()
+	results := fileResults(t, dir)
 	assert.Equal(t, map[string][]string{
 		"/a": {
 			"test b",
@@ -192,37 +163,23 @@ fallback:
 			"test nope e",
 		},
 	}, results)
-	resMut.Unlock()
 }
 
 func TestRejectErroredSadWholeBatch(t *testing.T) {
-	var resMut sync.Mutex
-	results := map[string][]string{} // Maps seen paths to seen data
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-
-		resMut.Lock()
-		defer resMut.Unlock()
-
-		results[r.URL.Path] = append(results[r.URL.Path], string(body))
-	}))
+	dir := t.TempDir()
 
 	conf := parseYAMLOutputConf(t, strings.ReplaceAll(`
 processors:
   - mapping: 'root = if content().contains("nope") { throw("no way") }'
 fallback:
   - reject_errored:
-      http_client:
-        url: $URL/a
-        retries: 1
-        retry_period: "1ms"
-  - http_client:
-      url: $URL/dlq
-      retries: 1
-      retry_period: "1ms"
-`, "$URL", server.URL))
+      file:
+        path: $URL/a
+        codec: lines
+  - file:
+      path: $URL/dlq
+      codec: lines
+`, "$URL", dir))
 
 	s, err := bundle.AllOutputs.Init(conf, mock.NewManager())
 	require.NoError(t, err)
@@ -265,7 +222,7 @@ fallback:
 		}
 	}
 
-	resMut.Lock()
+	results := fileResults(t, dir)
 	assert.Equal(t, map[string][]string{
 		"/dlq": {
 			"test nope a",
@@ -274,22 +231,10 @@ fallback:
 			"test nope d",
 		},
 	}, results)
-	resMut.Unlock()
 }
 
 func TestRejectErroredNestedBatchErrors(t *testing.T) {
-	var resMut sync.Mutex
-	results := map[string][]string{} // Maps seen paths to seen data
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-
-		resMut.Lock()
-		defer resMut.Unlock()
-
-		results[r.URL.Path] = append(results[r.URL.Path], string(body))
-	}))
+	dir := t.TempDir()
 
 	conf := parseYAMLOutputConf(t, strings.ReplaceAll(`
 processors:
@@ -297,17 +242,15 @@ processors:
 fallback:
   - reject_errored:
       reject_errored:
-        http_client:
-          url: $URL/a
-          retries: 1
-          retry_period: "1ms"
+        file:
+          path: $URL/a
+          codec: lines
       processors:
         - mapping: 'root = if content().contains("nah") { throw("nuh uh") }'
-  - http_client:
-      url: $URL/dlq
-      retries: 1
-      retry_period: "1ms"
-`, "$URL", server.URL))
+  - file:
+      path: $URL/dlq
+      codec: lines
+`, "$URL", dir))
 
 	s, err := bundle.AllOutputs.Init(conf, mock.NewManager())
 	require.NoError(t, err)
@@ -357,7 +300,7 @@ fallback:
 		}
 	}
 
-	resMut.Lock()
+	results := fileResults(t, dir)
 	assert.Equal(t, map[string][]string{
 		"/a": {
 			"test b",
@@ -371,22 +314,10 @@ fallback:
 			"test nah g",
 		},
 	}, results)
-	resMut.Unlock()
 }
 
 func TestRejectErroredNestedTotalErrors(t *testing.T) {
-	var resMut sync.Mutex
-	results := map[string][]string{} // Maps seen paths to seen data
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-
-		resMut.Lock()
-		defer resMut.Unlock()
-
-		results[r.URL.Path] = append(results[r.URL.Path], string(body))
-	}))
+	dir := t.TempDir()
 
 	conf := parseYAMLOutputConf(t, strings.ReplaceAll(`
 processors:
@@ -394,11 +325,10 @@ processors:
 fallback:
   - reject_errored:
       reject: "everything"
-  - http_client:
-      url: $URL/dlq
-      retries: 1
-      retry_period: "1ms"
-`, "$URL", server.URL))
+  - file:
+      path: $URL/dlq
+      codec: lines
+`, "$URL", dir))
 
 	s, err := bundle.AllOutputs.Init(conf, mock.NewManager())
 	require.NoError(t, err)
@@ -451,7 +381,7 @@ fallback:
 		}
 	}
 
-	resMut.Lock()
+	results := fileResults(t, dir)
 	assert.Equal(t, map[string][]string{
 		"/dlq": {
 			"test nope a",
@@ -464,5 +394,19 @@ fallback:
 			"test h",
 		},
 	}, results)
-	resMut.Unlock()
+}
+
+// fileResults is what the file outputs these tests write to wrote under dir,
+// one message a line, by the path each wrote to.
+func fileResults(t *testing.T, dir string) map[string][]string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	results := map[string][]string{}
+	for _, e := range entries {
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		require.NoError(t, err)
+		results["/"+e.Name()] = strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+	}
+	return results
 }

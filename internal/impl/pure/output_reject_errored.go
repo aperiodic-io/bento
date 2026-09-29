@@ -40,9 +40,9 @@ pipeline:
 
 output:
   reject_errored:
-    kafka_franz:
-      seed_brokers: [ localhost:9092 ]
-      topic: foos_processed
+    aws_s3:
+      bucket: foos_processed
+      path: ${! uuid_v4() }.json
 `,
 			).
 			Example(
@@ -57,14 +57,11 @@ pipeline:
 output:
   fallback:
     - reject_errored:
-        http_client:
-          url: http://foo:4195/post/might/become/unreachable
-          retries: 3
-          retry_period: 1s
-    - http_client:
-        url: http://bar:4196/somewhere/else
-        retries: 3
-        retry_period: 1s
+        aws_s3:
+          bucket: foos
+          path: ${! uuid_v4() }.json
+    - file:
+        path: ./dead_letters.jsonl
 `,
 			).
 			Field(service.NewOutputField("")),
