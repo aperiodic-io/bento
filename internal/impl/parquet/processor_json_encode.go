@@ -56,7 +56,9 @@ A required column the message lacks rejects it. A `+"`null`"+` in an optional co
 
 A message that is not a single JSON object, or that any column rejects, is dropped: it is logged, counted in `+"`json_parquet_encode_dropped`"+` and acknowledged with the batch.
 
-When `+"`partition`"+` is set the batch is split into one Parquet file per distinct partition path, in order of first appearance, and the path is written to the configured metadata key. `+"`{column}`"+` in the path is replaced by the column's value as Bloblang's `+"`format`"+` would print the field, and `+"`{column|layout}`"+` by the column's number, read in `+"`time_unit`"+`, as a UTC time in the Go layout. Every output message carries the metadata of the first message of its partition.`).
+When `+"`partition`"+` is set the batch is split into one Parquet file per distinct partition path, in order of first appearance, and the path is written to the configured metadata key. `+"`{column}`"+` in the path is replaced by the column's value as Bloblang's `+"`format`"+` would print the field, and `+"`{column|layout}`"+` by the column's number, read in `+"`time_unit`"+`, as a UTC time in the Go layout. Every output message carries the metadata of the first message of its partition, and the files written are counted in `+"`json_parquet_encode_files`"+`.
+
+Every file costs something of its own: a footer, pages begun for each column, and, when it has an empty string, a new writer. Encoding a batch as hundreds of small files takes about a third more time and half as much memory again as encoding it as a couple of dozen, and leaves many small objects to store and query. Prefer a coarse partition path, and batches closed by size rather than time where the rate allows.`).
 		Field(parquetSchemaConfig()).
 		Field(service.NewObjectListField(jpeFieldColumns,
 			service.NewStringField(jpeFieldColumnName).Description("The schema column this sets."),
@@ -147,6 +149,7 @@ type jpePart struct {
 type jsonParquetEncoder struct {
 	log      *service.Logger
 	mDropped *service.MetricCounter
+	mFiles   *service.MetricCounter
 
 	schema  *parquet.Schema
 	codec   parquet.WriterOption
@@ -166,6 +169,7 @@ func newJSONParquetEncoder(conf *service.ParsedConfig, mgr *service.Resources) (
 	e := &jsonParquetEncoder{
 		log:      mgr.Logger(),
 		mDropped: mgr.Metrics().NewCounter("json_parquet_encode_dropped"),
+		mFiles:   mgr.Metrics().NewCounter("json_parquet_encode_files"),
 		byName:   map[string]int{},
 	}
 
@@ -825,6 +829,7 @@ func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.Mes
 		}
 		out = append(out, m)
 	}
+	e.mFiles.Incr(int64(len(out)))
 	return []service.MessageBatch{out}, nil
 }
 

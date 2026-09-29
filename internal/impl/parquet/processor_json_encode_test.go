@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/warpstreamlabs/bento/internal/component/metrics"
+	"github.com/warpstreamlabs/bento/internal/manager/mock"
 	"github.com/warpstreamlabs/bento/public/service"
 )
 
@@ -235,4 +237,27 @@ columns: [ { name: a, value: '${! @topic }-${! count("jpe_cached_typed") }', cac
 		got = append(got, string(row[0].ByteArray()))
 	}
 	assert.Equal(t, []string{"1-1", "1-2", "1-3"}, got)
+}
+
+func TestJSONParquetEncodeCountsFilesAndDrops(t *testing.T) {
+	parsed, err := jsonParquetEncodeSpec().ParseYAML(`
+schema: [ { name: p, type: UTF8 }, { name: n, type: INT64 } ]
+partition: { path: '{p}' }
+`, nil)
+	require.NoError(t, err)
+	local := metrics.NewLocal()
+	e, err := newJSONParquetEncoder(parsed, service.MockResources(func(m *mock.Manager) { m.M = local }))
+	require.NoError(t, err)
+	for range 2 {
+		_, err = e.ProcessBatch(context.Background(), service.MessageBatch{
+			service.NewMessage([]byte(`{"p":"a","n":1}`)),
+			service.NewMessage([]byte(`{"p":"b","n":2}`)),
+			service.NewMessage([]byte(`{"p":"a","n":3}`)),
+			service.NewMessage([]byte(`{"p":"c","n":"x"}`)), // dropped
+		})
+		require.NoError(t, err)
+	}
+	counters := local.GetCounters()
+	assert.Equal(t, int64(4), counters["json_parquet_encode_files"])
+	assert.Equal(t, int64(2), counters["json_parquet_encode_dropped"])
 }
