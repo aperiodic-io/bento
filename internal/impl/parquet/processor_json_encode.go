@@ -379,8 +379,7 @@ func (e *jsonParquetEncoder) parsePartitionPath(path string) ([]jpePart, error) 
 // JSON decoding gives the field (string, json.Number, bool, nil, or a map or
 // slice), and hands them that value itself where it is not a string or number.
 type jpeRow struct {
-	present []bool
-	kind    []byte // '"', '0', 't', 'f', 'n', '{' or '['
+	kind    []byte // as jsontext.Kind: '"', '0', 't', 'f', 'n', '{' or '[', and 0 when absent
 	start   []int
 	end     []int
 	buf     []byte
@@ -389,10 +388,9 @@ type jpeRow struct {
 
 func newJPERow(columns int) *jpeRow {
 	return &jpeRow{
-		present: make([]bool, columns),
-		kind:    make([]byte, columns),
-		start:   make([]int, columns),
-		end:     make([]int, columns),
+		kind:  make([]byte, columns),
+		start: make([]int, columns),
+		end:   make([]int, columns),
 	}
 }
 
@@ -413,7 +411,7 @@ func (r *jpeRow) goValue(i int) (any, error) {
 		return true, nil
 	case 'f':
 		return false, nil
-	case 'n':
+	case 'n', 0: // an absent field reads as null, as nil
 		return nil, nil
 	}
 	nested := json.NewDecoder(bytes.NewReader(c))
@@ -431,7 +429,7 @@ var jpeDecodeOptions = []jsontext.Options{
 	jsontext.AllowInvalidUTF8(true),
 }
 
-// unquote returns the text of a JSON string as jsontext.Token.String would: the
+// unquoteString returns the text of a JSON string as jsontext.Token.String would: the
 // literal's own bytes when it has no escape and is valid UTF-8, and its decoding,
 // with invalid UTF-8 mangled into U+FFFD, otherwise. The result is only valid
 // until the next call.
@@ -450,11 +448,7 @@ func (r *jpeRow) unquoteString(lit []byte) []byte {
 // an object fails too, which only drops what the coercion would have dropped
 // anyway, since a schema read from the message has at least one column.
 func (e *jsonParquetEncoder) parse(dec *jsontext.Decoder, src *bytes.Reader, raw []byte, r *jpeRow) error {
-	clear(r.present)
-	for i := range r.kind { // an absent field reads as null, as nil did
-		r.kind[i] = 'n'
-		r.start[i], r.end[i] = 0, 0
-	}
+	clear(r.kind)
 	r.buf = r.buf[:0]
 	src.Reset(raw)
 	dec.Reset(src, jpeDecodeOptions...)
@@ -482,18 +476,13 @@ func (e *jsonParquetEncoder) parse(dec *jsontext.Decoder, src *bytes.Reader, raw
 		if err != nil {
 			return fmt.Errorf("not JSON: %w", err)
 		}
-		kind := v[0]
-		switch kind {
-		case '"':
+		r.kind[i] = byte(v.Kind())
+		if r.kind[i] == '"' {
 			v = r.unquoteString(v)
-		case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
-			kind = '0'
 		}
-		r.kind[i] = kind
 		r.start[i] = len(r.buf)
 		r.buf = append(r.buf, v...)
 		r.end[i] = len(r.buf)
-		r.present[i] = true
 	}
 	if _, err := dec.ReadToken(); err != nil { // the closing '}'
 		return fmt.Errorf("not JSON: %w", err)
@@ -523,12 +512,6 @@ func (e *jsonParquetEncoder) column(r *jpeRow, name []byte) (int, bool) {
 	return i, ok
 }
 
-// jpeUnsafeString views b as a string for a call that neither keeps nor
-// returns it (strconv copies the input into the errors it returns).
-func jpeUnsafeString(b []byte) string {
-	return unsafe.String(unsafe.SliceData(b), len(b))
-}
-
 // value coerces field i of r, as the column's Bloblang coercion would, into the
 // Parquet value of the column's leaf. A string or number is parsed by the very
 // strconv call the coercion would make of it (json.Number's Int64 and Float64
@@ -536,13 +519,13 @@ func jpeUnsafeString(b []byte) string {
 // else is handed to the coercion itself.
 func (e *jsonParquetEncoder) value(a *jpeArena, c *jpeColumn, r *jpeRow, i int) (parquet.Value, error) {
 	def := c.definitionLevel()
-	present, kind := r.present[i], r.kind[i]
+	kind := r.kind[i]
 	var v any // set for the coercion when the field is neither a string nor a number
-	if !present || kind == 'n' {
+	if kind == 0 || kind == 'n' {
 		switch {
 		case c.optional:
 			return parquet.NullValue().Level(0, 0, c.leaf), nil
-		case !present:
+		case kind == 0:
 			return parquet.Value{}, errors.New("missing")
 		case e.nanNull && (c.kind == jpeFloat || c.kind == jpeDouble):
 			v = math.NaN()
@@ -555,7 +538,6 @@ func (e *jsonParquetEncoder) value(a *jpeArena, c *jpeColumn, r *jpeRow, i int) 
 			return parquet.Value{}, err
 		}
 	}
-	content := jpeUnsafeString(r.content(i))
 	var pv parquet.Value
 	switch c.kind {
 	case jpeUTF8:
@@ -572,9 +554,9 @@ func (e *jsonParquetEncoder) value(a *jpeArena, c *jpeColumn, r *jpeRow, i int) 
 		case v != nil:
 			n, err = value.IToInt(v)
 		case kind == '0':
-			n, err = strconv.ParseInt(content, 10, 64)
+			n, err = strconv.ParseInt(string(r.content(i)), 10, 64)
 		default:
-			n, err = strconv.ParseInt(content, 0, 64)
+			n, err = strconv.ParseInt(string(r.content(i)), 0, 64)
 		}
 		if err != nil {
 			return parquet.Value{}, err
@@ -597,7 +579,7 @@ func (e *jsonParquetEncoder) value(a *jpeArena, c *jpeColumn, r *jpeRow, i int) 
 		if v != nil {
 			f, err = value.IToNumber(v)
 		} else {
-			f, err = strconv.ParseFloat(content, 64)
+			f, err = strconv.ParseFloat(string(r.content(i)), 64)
 		}
 		if err != nil {
 			return parquet.Value{}, err
@@ -635,7 +617,7 @@ func (e *jsonParquetEncoder) appendPartitionPath(b []byte, r *jpeRow, interpolat
 			var err error
 			if r.kind[p.column] == '0' {
 				// json.Number's Float64
-				n, err = strconv.ParseFloat(jpeUnsafeString(r.content(p.column)), 64)
+				n, err = strconv.ParseFloat(string(r.content(p.column)), 64)
 			} else {
 				var v any
 				if v, err = r.goValue(p.column); err == nil {
@@ -664,10 +646,8 @@ func (e *jsonParquetEncoder) appendPartitionPath(b []byte, r *jpeRow, interpolat
 // every row and every string. A group's chunks are dropped with it once its
 // file is written, so the rows of a batch shrink as its files are encoded.
 type jpeArena struct {
-	values    []parquet.Value
-	bytes     []byte
-	nextRows  int
-	nextBytes int
+	values []parquet.Value
+	bytes  []byte
 }
 
 const (
@@ -678,8 +658,7 @@ const (
 // row returns an n-value row.
 func (a *jpeArena) row(n int) parquet.Row {
 	if cap(a.values)-len(a.values) < n {
-		a.nextRows = min(max(2*a.nextRows, 1), jpeArenaRows)
-		a.values = make([]parquet.Value, 0, a.nextRows*n)
+		a.values = make([]parquet.Value, 0, min(max(2*cap(a.values)/n, 1), jpeArenaRows)*n)
 	}
 	start := len(a.values)
 	a.values = a.values[:start+n]
@@ -694,11 +673,11 @@ func (a *jpeArena) copy(b []byte) []byte {
 		return append([]byte(nil), b...)
 	}
 	if cap(a.bytes)-len(a.bytes) < len(b) {
-		a.nextBytes = min(max(2*a.nextBytes, 64), jpeArenaBytes)
-		for a.nextBytes < jpeArenaBytes && a.nextBytes < 4*len(b) {
-			a.nextBytes *= 2
+		size := min(max(2*cap(a.bytes), 64), jpeArenaBytes)
+		for size < jpeArenaBytes && size < 4*len(b) {
+			size *= 2
 		}
-		a.bytes = make([]byte, 0, a.nextBytes)
+		a.bytes = make([]byte, 0, size)
 	}
 	start := len(a.bytes)
 	a.bytes = append(a.bytes, b...)

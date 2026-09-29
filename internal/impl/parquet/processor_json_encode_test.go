@@ -19,11 +19,11 @@ import (
 	"github.com/warpstreamlabs/bento/public/service"
 )
 
-func newTestJSONEncoder(t *testing.T, conf string) (*jsonParquetEncoder, error) {
-	t.Helper()
+func newTestJSONEncoder(tb testing.TB, conf string, opts ...service.MockResourcesOptFn) (*jsonParquetEncoder, error) {
+	tb.Helper()
 	parsed, err := jsonParquetEncodeSpec().ParseYAML(conf, nil)
-	require.NoError(t, err)
-	return newJSONParquetEncoder(parsed, service.MockResources())
+	require.NoError(tb, err)
+	return newJSONParquetEncoder(parsed, service.MockResources(opts...))
 }
 
 func TestJSONParquetEncodeRejectsWhatItCannotWrite(t *testing.T) {
@@ -272,13 +272,11 @@ func encodedColumn(t *testing.T, e *jsonParquetEncoder, batch service.MessageBat
 }
 
 func TestJSONParquetEncodeCountsFilesAndDrops(t *testing.T) {
-	parsed, err := jsonParquetEncodeSpec().ParseYAML(`
+	local := metrics.NewLocal()
+	e, err := newTestJSONEncoder(t, `
 schema: [ { name: p, type: UTF8 }, { name: n, type: INT64 } ]
 partition: { path: '{p}' }
-`, nil)
-	require.NoError(t, err)
-	local := metrics.NewLocal()
-	e, err := newJSONParquetEncoder(parsed, service.MockResources(func(m *mock.Manager) { m.M = local }))
+`, func(m *mock.Manager) { m.M = local })
 	require.NoError(t, err)
 	for range 2 {
 		_, err = e.ProcessBatch(context.Background(), service.MessageBatch{
@@ -297,16 +295,14 @@ partition: { path: '{p}' }
 // BenchmarkJSONParquetEncodeRejected is a batch a producer broke: every row
 // lacks a required column, each in a partition of its own.
 func BenchmarkJSONParquetEncodeRejected(b *testing.B) {
-	parsed, err := jsonParquetEncodeSpec().ParseYAML(`
+	e, err := newTestJSONEncoder(b, `
 schema:
   - { name: p, type: UTF8 }
   - { name: s, type: UTF8 }
   - { name: t, type: INT64 }
   - { name: x, type: DOUBLE }
 partition: { path: '{p}' }
-`, nil)
-	require.NoError(b, err)
-	e, err := newJSONParquetEncoder(parsed, service.MockResources())
+`)
 	require.NoError(b, err)
 	var batch service.MessageBatch
 	for i := range 10000 {
