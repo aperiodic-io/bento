@@ -35,7 +35,7 @@ func jsonParquetEncodeSpec() *service.ConfigSpec {
 		Categories("Parsing").
 		Summary("Encodes a batch of flat JSON objects straight into Parquet, row by row, without holding the batch as structured messages.").
 		Description(`
-Produces the same Parquet as chaining a `+"`mapping`"+` that coerces each column, a `+"`catch`"+` that drops the rows it rejects, `+"`group_by_value`"+` on a partition path and `+"`parquet_encode`"+`, at a fraction of the memory: each message is parsed once, straight into the Parquet writer's column buffers, so a batch is held only as its raw bytes.
+Produces the same Parquet as chaining a `+"`mapping`"+` that coerces each column, a `+"`catch`"+` that drops the rows it rejects, `+"`group_by_value`"+` on a partition path and `+"`parquet_encode`"+`, at a fraction of the memory: a batch is held only as its raw bytes until it is processed, each message is then parsed once into a Parquet row, and the files are encoded one at a time.
 
 The schema is `+"`parquet_encode`"+`'s, restricted to flat `+"`UTF8`"+`, `+"`INT32`"+`, `+"`INT64`"+`, `+"`FLOAT`"+` and `+"`DOUBLE`"+` columns, and the file is written by the same encoder. A column reads the message field of its name and coerces it as Bloblang would:
 
@@ -495,17 +495,13 @@ func (e *jsonParquetEncoder) partitionPath(b *strings.Builder, r *jpeRow, interp
 
 //------------------------------------------------------------------------------
 
+// jpeGroup is one output file: the rows of one partition path, held until the
+// batch is read, and then encoded while no other group's file is.
 type jpeGroup struct {
-	first  *service.Message
-	key    string
-	buf    bytes.Buffer
-	writer *parquet.GenericWriter[any]
-	rows   []parquet.Row
+	first *service.Message
+	key   string
+	rows  []parquet.Row
 }
-
-// jpeFlushRows bounds the rows a group holds before handing them to its writer,
-// whose column buffers hold the rest of the file.
-const jpeFlushRows = 256
 
 func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.MessageBatch) ([]service.MessageBatch, error) {
 	if len(batch) == 0 {
@@ -568,39 +564,37 @@ func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.Mes
 		if current == nil || current.key != k {
 			if current = byKey[k]; current == nil {
 				current = &jpeGroup{first: msg, key: k}
-				current.writer = parquet.NewGenericWriter[any](&current.buf, e.schema, e.codec)
 				byKey[k] = current
 				groups = append(groups, current)
 			}
 		}
 		current.rows = append(current.rows, values)
-		if len(current.rows) == jpeFlushRows {
-			if err := jpeWriteRows(current); err != nil {
-				return nil, err
-			}
-		}
 	}
 	if dropped > 0 {
 		e.mDropped.Incr(int64(dropped))
 	}
+	if len(groups) == 0 {
+		return nil, nil
+	}
 
+	// Files are encoded one at a time, as parquet_encode encodes each group
+	// group_by_value hands it: a writer's column buffers are the bulk of what
+	// encoding holds, so a batch of many partitions must not hold one per file.
+	// Each file takes a new writer, since a reset one does not write the same
+	// bytes as a new one.
 	out := make(service.MessageBatch, 0, len(groups))
 	for _, g := range groups {
-		if err := jpeWriteRows(g); err != nil {
+		var buf bytes.Buffer
+		if err := jpeEncode(parquet.NewGenericWriter[any](&buf, e.schema, e.codec), g.rows); err != nil {
 			return nil, err
 		}
-		if err := jpeClose(g.writer); err != nil {
-			return nil, err
-		}
+		g.rows = nil
 		m := g.first.Copy()
-		m.SetBytes(g.buf.Bytes())
+		m.SetBytes(buf.Bytes())
 		if e.partition != nil {
 			m.MetaSetMut(e.partitionMeta, g.key)
 		}
 		out = append(out, m)
-	}
-	if len(out) == 0 {
-		return nil, nil
 	}
 	return []service.MessageBatch{out}, nil
 }
@@ -620,26 +614,16 @@ func (e *jsonParquetEncoder) interpolate(msg *service.Message, interpolated []st
 	return nil
 }
 
-func jpeWriteRows(g *jpeGroup) (err error) {
+// jpeEncode writes rows as one whole file.
+func jpeEncode(w *parquet.GenericWriter[any], rows []parquet.Row) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("encoding panic: %v", r)
 		}
 	}()
-	if len(g.rows) == 0 {
-		return nil
+	if _, err = w.WriteRows(rows); err != nil {
+		return err
 	}
-	_, err = g.writer.WriteRows(g.rows)
-	g.rows = g.rows[:0]
-	return err
-}
-
-func jpeClose(w *parquet.GenericWriter[any]) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("encoding panic: %v", r)
-		}
-	}()
 	return w.Close()
 }
 

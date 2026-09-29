@@ -63,7 +63,7 @@ json_parquet_encode:
 </TabItem>
 </Tabs>
 
-Produces the same Parquet as chaining a `mapping` that coerces each column, a `catch` that drops the rows it rejects, `group_by_value` on a partition path and `parquet_encode`, at a fraction of the memory: each message is parsed once, straight into the Parquet writer's column buffers, so a batch is held only as its raw bytes.
+Produces the same Parquet as chaining a `mapping` that coerces each column, a `catch` that drops the rows it rejects, `group_by_value` on a partition path and `parquet_encode`, at a fraction of the memory: a batch is held only as its raw bytes until it is processed, each message is then parsed once into a Parquet row, and the files are encoded one at a time.
 
 The schema is `parquet_encode`'s, restricted to flat `UTF8`, `INT32`, `INT64`, `FLOAT` and `DOUBLE` columns, and the file is written by the same encoder. A column reads the message field of its name and coerces it as Bloblang would:
 
