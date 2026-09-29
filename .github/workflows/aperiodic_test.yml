@@ -76,6 +76,17 @@ jobs:
         if: needs.changes.outputs.modules == 'true'
         run: go mod tidy && git diff --exit-code go.mod go.sum || { >&2 echo "Stale go.{mod,sum} detected. This can be fixed with 'make deps'."; exit 1; }
 
+      # Downloads only the modules the touched packages build with, retrying the
+      # module proxy's intermittent stream errors.
+      - name: Download modules
+        if: env.PACKAGES != ''
+        run: |
+          for attempt in 1 2 3 4 5; do
+            go list -deps -test $PACKAGES > /dev/null && exit 0
+            sleep $((attempt * 10))
+          done
+          exit 1
+
       - name: Vet
         if: env.PACKAGES != ''
         run: go vet $PACKAGES
