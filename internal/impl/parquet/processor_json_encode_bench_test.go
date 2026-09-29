@@ -101,52 +101,78 @@ var fewPartitions = func() paritySchema {
 	return s
 }()
 
+// oneFile is cachedArchiveSchema unpartitioned: the batch is one file.
+var oneFile = func() paritySchema {
+	s := cachedArchiveSchema
+	s.partition, s.legacyPartition = "", ""
+	return s
+}()
+
+// tinyFiles is cachedArchiveSchema partitioned by the microsecond: a file a
+// message, the most a batch can be split into.
+var tinyFiles = func() paritySchema {
+	s := cachedArchiveSchema
+	s.partition = "{time}"
+	s.legacyPartition = `"%s".format(this.time)`
+	return s
+}()
+
 // BenchmarkJSONParquetEncode runs a full batch through each pipeline, split
-// into many files and into few, and reports the heap's peak above what it held
-// before the batch.
+// into many files, few and one, and reports the heap's peak above what it held
+// before the batch. Split into a file a message, only json_parquet_encode is
+// run: the legacy pipeline takes minutes.
 func BenchmarkJSONParquetEncode(b *testing.B) {
 	in := benchBatch(b)
+	for _, shape := range []struct {
+		name      string
+		schema    paritySchema
+		legacyToo bool
+	}{
+		{"many_files", cachedArchiveSchema, true},
+		{"few_files", fewPartitions, true},
+		{"one_file", oneFile, true},
+		{"file_per_message", tinyFiles, false},
+	} {
+		p := pairFor(b, shape.schema)
+		b.Run(shape.name+"/json_parquet_encode", func(b *testing.B) { benchEncode(b, p.next, in) })
+		if shape.legacyToo {
+			b.Run(shape.name+"/legacy", func(b *testing.B) { benchEncode(b, p.legacy, in) })
+		}
+	}
+}
+
+func benchEncode(b *testing.B, s *parityStream, in []parityInput) {
 	raw := 0
 	for _, m := range in {
 		raw += len(m.body)
 	}
-	for _, partitions := range []struct {
-		name   string
-		schema paritySchema
-	}{{"many_files", cachedArchiveSchema}, {"few_files", fewPartitions}} {
-		p := pairFor(b, partitions.schema)
-		for name, s := range map[string]*parityStream{"legacy": p.legacy, "json_parquet_encode": p.next} {
-			b.Run(partitions.name+"/"+name, func(b *testing.B) {
-				b.SetBytes(int64(raw))
-				b.ReportAllocs()
-				var peakSum, files float64
-				for i := 0; i < b.N; i++ {
-					before := liveHeap()
-					var peak atomic.Uint64
-					done := make(chan struct{})
-					go func() {
-						t := time.NewTicker(time.Millisecond)
-						defer t.Stop()
-						for {
-							select {
-							case <-done:
-								return
-							case <-t.C:
-								if h := heapBytes(); h > peak.Load() {
-									peak.Store(h)
-								}
-							}
-						}
-					}()
-					out := s.run(b, in)
-					close(done)
-					require.NotEmpty(b, out)
-					files = float64(len(out))
-					peakSum += float64(peak.Load()-min(before, peak.Load())) / (1 << 20)
+	b.SetBytes(int64(raw))
+	b.ReportAllocs()
+	var peakSum, files float64
+	for i := 0; i < b.N; i++ {
+		before := liveHeap()
+		var peak atomic.Uint64
+		done := make(chan struct{})
+		go func() {
+			t := time.NewTicker(time.Millisecond)
+			defer t.Stop()
+			for {
+				select {
+				case <-done:
+					return
+				case <-t.C:
+					if h := heapBytes(); h > peak.Load() {
+						peak.Store(h)
+					}
 				}
-				b.ReportMetric(peakSum/float64(b.N), "peak-heap-MiB")
-				b.ReportMetric(files, "files")
-			})
-		}
+			}
+		}()
+		out := s.run(b, in)
+		close(done)
+		require.NotEmpty(b, out)
+		files = float64(len(out))
+		peakSum += float64(peak.Load()-min(before, peak.Load())) / (1 << 20)
 	}
+	b.ReportMetric(peakSum/float64(b.N), "peak-heap-MiB")
+	b.ReportMetric(files, "files")
 }
