@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"strings"
 	"testing"
 
@@ -180,6 +181,24 @@ func TestJSONParquetParityCachedColumn(t *testing.T) {
 		in := make([]parityInput, 1+r.IntN(400))
 		for j := range in {
 			in[j] = randomRow(r)
+		}
+		requireParity(t, s, in)
+	}
+}
+
+func TestJSONParquetParityOptionalInterpolatedColumn(t *testing.T) {
+	// an optional column set from metadata holds its value, as the mapping sets
+	// it, and not NULL
+	for _, s := range []paritySchema{archiveSchema, archiveSchema.cached()} {
+		s.columns = slices.Clone(s.columns)
+		for i := range s.columns {
+			if s.columns[i].fromMeta != "" {
+				s.columns[i].optional = true
+			}
+		}
+		var in []parityInput
+		for _, topic := range []string{parityTopic, "metric.v1.okx-perps.15s", "", "metric.v1..15s"} {
+			in = append(in, parityInput{topic: topic, body: rowWith("", "")})
 		}
 		requireParity(t, s, in)
 	}

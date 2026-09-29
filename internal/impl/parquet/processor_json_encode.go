@@ -138,6 +138,15 @@ type jpeColumn struct {
 	cacheBy []string
 }
 
+// definitionLevel is the definition level of a value in the column: 1 for an
+// optional one, 0 for a required one or a null.
+func (c *jpeColumn) definitionLevel() int {
+	if c.optional {
+		return 1
+	}
+	return 0
+}
+
 // jpePart is one piece of a partition path: literal text, or a column formatted
 // as Bloblang's format prints it (layout empty) or as a time (layout set).
 type jpePart struct {
@@ -497,10 +506,7 @@ func jpeUnsafeString(b []byte) string {
 // parse in base 10, a string's integer in any base Go literals use); anything
 // else is handed to the coercion itself.
 func (e *jsonParquetEncoder) value(a *jpeArena, c *jpeColumn, r *jpeRow, i int) (parquet.Value, error) {
-	def := 0
-	if c.optional {
-		def = 1
-	}
+	def := c.definitionLevel()
 	present, kind := r.present[i], r.kind[i]
 	var v any // set for the coercion when the field is neither a string nor a number
 	if !present || kind == 'n' {
@@ -767,7 +773,7 @@ func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.Mes
 		for i := range e.columns {
 			c := &e.columns[i]
 			if c.interp != nil {
-				values[c.leaf] = parquet.ByteArrayValue(g.arena.copyString(interpolated[i])).Level(0, 0, c.leaf)
+				values[c.leaf] = parquet.ByteArrayValue(g.arena.copyString(interpolated[i])).Level(0, c.definitionLevel(), c.leaf)
 				continue
 			}
 			if values[c.leaf], err = e.value(&g.arena, c, row, i); err != nil {
