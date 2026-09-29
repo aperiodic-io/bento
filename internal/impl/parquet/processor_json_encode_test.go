@@ -291,3 +291,29 @@ partition: { path: '{p}' }
 	assert.Equal(t, int64(4), counters["json_parquet_encode_files"])
 	assert.Equal(t, int64(2), counters["json_parquet_encode_dropped"])
 }
+
+// BenchmarkJSONParquetEncodeRejected is a batch a producer broke: every row
+// lacks a required column, each in a partition of its own.
+func BenchmarkJSONParquetEncodeRejected(b *testing.B) {
+	parsed, err := jsonParquetEncodeSpec().ParseYAML(`
+schema:
+  - { name: p, type: UTF8 }
+  - { name: s, type: UTF8 }
+  - { name: t, type: INT64 }
+  - { name: x, type: DOUBLE }
+partition: { path: '{p}' }
+`, nil)
+	require.NoError(b, err)
+	e, err := newJSONParquetEncoder(parsed, service.MockResources())
+	require.NoError(b, err)
+	var batch service.MessageBatch
+	for i := range 10000 {
+		batch = append(batch, service.NewMessage(fmt.Appendf(nil, `{"p":"p%d","s":"some symbol","t":%d}`, i, i)))
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		out, err := e.ProcessBatch(context.Background(), batch)
+		require.NoError(b, err)
+		require.Nil(b, out)
+	}
+}

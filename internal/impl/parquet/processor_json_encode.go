@@ -701,16 +701,19 @@ func (a *jpeArena) mark() jpeArenaMark {
 	return jpeArenaMark{unsafe.SliceData(a.values), len(a.values), unsafe.SliceData(a.bytes), len(a.bytes)}
 }
 
-// release gives back what was taken since m, of the chunks still current: a
-// dropped row's values and bytes.
+// release gives back what was taken since m: a dropped row's values and
+// bytes. A chunk begun since m holds nothing else, and is emptied.
 func (a *jpeArena) release(m jpeArenaMark) {
-	if unsafe.SliceData(a.values) == m.values {
-		clear(a.values[m.nv:])
-		a.values = a.values[:m.nv]
+	nv, nb := m.nv, m.nb
+	if unsafe.SliceData(a.values) != m.values {
+		nv = 0
 	}
-	if unsafe.SliceData(a.bytes) == m.bytes {
-		a.bytes = a.bytes[:m.nb]
+	if unsafe.SliceData(a.bytes) != m.bytes {
+		nb = 0
 	}
+	clear(a.values[nv:])
+	a.values = a.values[:nv]
+	a.bytes = a.bytes[:nb]
 }
 
 // jpeGroup is one output file: the rows of one partition path, held until the
@@ -771,6 +774,7 @@ func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.Mes
 		interpolated  = make([]string, len(e.columns))
 		interpolation = e.newInterpolation()
 		key           []byte
+		spare         *jpeGroup // the group of a new partition, until a row of it is kept
 		dropped       int
 	)
 	drop := func(err error) {
@@ -798,13 +802,16 @@ func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.Mes
 				continue
 			}
 		}
-		// The key is only copied into a string for a new partition: the
-		// comparison and lookup of string(key) do not allocate. A new group is
-		// only kept once a row of it is.
+		// The key is only copied into a string for a new partition, once a row
+		// of it is kept: the comparison and lookup of string(key) do not
+		// allocate, and a rejected row leaves the spare group as it found it.
 		g, isNew := current, false
 		if g == nil || g.key != string(key) {
 			if g = byKey[string(key)]; g == nil {
-				g, isNew = &jpeGroup{first: msg, key: string(key)}, true
+				if spare == nil {
+					spare = &jpeGroup{}
+				}
+				g, isNew = spare, true
 			}
 		}
 		mark := g.arena.mark()
@@ -826,7 +833,9 @@ func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.Mes
 			continue
 		}
 		if isNew {
+			g.first, g.key = msg, string(key)
 			g.nonNull, g.empty = make([]int, len(e.utf8Leaves)), make([]int, len(e.utf8Leaves))
+			spare = nil
 		}
 		for k, leaf := range e.utf8Leaves {
 			if v := values[leaf]; !v.IsNull() {
