@@ -1,8 +1,10 @@
 package parquet_test
 
 import (
+	"bytes"
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"strings"
 	"testing"
 
@@ -116,7 +118,9 @@ func TestJSONParquetParityMessages(t *testing.T) {
 		"invalid utf8 in extra":  strings.TrimSuffix(valid, "}") + ",\"extra\":\"\xff\"}",
 		"invalid utf8 in name":   strings.TrimSuffix(valid, "}") + ",\"\xff\":1}",
 		"invalid json in extra":  strings.TrimSuffix(valid, "}") + `,"extra":[1,}`,
-		"escaped field name":     strings.Replace(valid, `"symbol"`, `"symbol"`, 1),
+		"escaped field name":     strings.Replace(valid, `"symbol"`, `"\u0073ymbol"`, 1),
+		"escaped names, values":  strings.Replace(strings.Replace(valid, `"symbol":"perpetual-BTC-USDT:USD"`, `"\u0073ymbol":"a\"b\u00e9"`, 1), `"time"`, `"t\u0069me"`, 1),
+		"escaped unknown name":   strings.Replace(valid, `"symbol":`, `"s\u0079mbol2":"x","\u0073ymbol":`, 1),
 		"deep nesting in extra":  strings.TrimSuffix(valid, "}") + `,"extra":` + strings.Repeat("[", 5000) + strings.Repeat("]", 5000) + `}`,
 		"too deep in extra":      strings.TrimSuffix(valid, "}") + `,"extra":` + strings.Repeat("[", 20000) + strings.Repeat("]", 20000) + `}`,
 		"long string":            strings.Replace(valid, `"perpetual-BTC-USDT:USD"`, `"`+strings.Repeat("x", 1<<20)+`"`, 1),
@@ -126,6 +130,24 @@ func TestJSONParquetParityMessages(t *testing.T) {
 			requireParity(t, archiveSchema, []parityInput{{topic: parityTopic, body: []byte(body)}})
 		})
 	}
+}
+
+func TestJSONParquetParityLongStringsAmongOthers(t *testing.T) {
+	// long strings, of every size around the arena's, in a batch of other
+	// messages and partitions: a value must not share memory that a later
+	// message is parsed into
+	var in []parityInput
+	for i, n := range []int{4095, 4096, 4097, 5000, 16 << 10, 64 << 10, 1 << 20} {
+		long := fmt.Sprintf(`"%s"`, strings.Repeat(string(rune('a'+i)), n))
+		in = append(in,
+			parityInput{topic: parityTopic, body: rowWith("symbol", long)},
+			parityInput{topic: "metric.v1.okx-perps.15s", body: rowWith("symbol", `"short"`)},
+			parityInput{topic: parityTopic, body: rowWith("interval", long)},
+			parityInput{topic: parityTopic, body: rowWith("count", `"x"`)}, // dropped
+			parityInput{topic: "metric.v1.top-3.15s", body: rowWith("", "")},
+		)
+	}
+	requireParity(t, archiveSchema, in)
 }
 
 func TestJSONParquetParityMetadata(t *testing.T) {
@@ -140,6 +162,47 @@ func TestJSONParquetParityMetadata(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			requireParity(t, archiveSchema, []parityInput{{topic: topic, body: body}})
 		})
+	}
+}
+
+func TestJSONParquetParityCachedColumn(t *testing.T) {
+	// the interpolated column evaluated once per topic a batch, over topics
+	// that differ, repeat, and are absent, within one batch and across batches
+	s := archiveSchema.cached()
+	body := rowWith("", "")
+	var in []parityInput
+	for _, topic := range []string{
+		parityTopic, "", "metric.v1.okx-perps.15s", "metric.v1", parityTopic, "a.b.c",
+		"metric.v1..15s", "", "metric.v1.交易所.15s", "metric.v1.okx-perps.15s", parityTopic,
+	} {
+		in = append(in, parityInput{topic: topic, body: body})
+	}
+	requireParity(t, s, in)
+	r := rand.New(rand.NewPCG(5, 6))
+	for range 50 {
+		in := make([]parityInput, 1+r.IntN(400))
+		for j := range in {
+			in[j] = randomRow(r)
+		}
+		requireParity(t, s, in)
+	}
+}
+
+func TestJSONParquetParityOptionalInterpolatedColumn(t *testing.T) {
+	// an optional column set from metadata holds its value, as the mapping sets
+	// it, and not NULL
+	for _, s := range []paritySchema{archiveSchema, archiveSchema.cached()} {
+		s.columns = slices.Clone(s.columns)
+		for i := range s.columns {
+			if s.columns[i].fromMeta != "" {
+				s.columns[i].optional = true
+			}
+		}
+		var in []parityInput
+		for _, topic := range []string{parityTopic, "metric.v1.okx-perps.15s", "", "metric.v1..15s"} {
+			in = append(in, parityInput{topic: topic, body: rowWith("", "")})
+		}
+		requireParity(t, s, in)
 	}
 }
 
@@ -166,6 +229,20 @@ func TestJSONParquetParityPartitions(t *testing.T) {
 	for _, m := range in {
 		requireParity(t, archiveSchema, []parityInput{m})
 	}
+}
+
+func TestJSONParquetParityOptionalPartitionField(t *testing.T) {
+	// an optional field in the path, present, absent and null in turn, so an
+	// absent one cannot be read as the previous message's
+	s := archiveSchema
+	s.partition = "{count_opt}/{time|2006}"
+	s.legacyPartition = `"%s/%s".format(this.count_opt, (this.time / 1000000).ts_format("2006", "UTC"))`
+	var in []parityInput
+	for _, v := range []string{`5`, missing, `"x"`, missing, `null`, `7`, missing} {
+		in = append(in, parityInput{topic: parityTopic, body: rowWith("count_opt", v)})
+	}
+	files := requireParity(t, s, in)
+	require.Greater(t, len(files), 2)
 }
 
 // randomRow draws a row as production would send one, and now and then
@@ -255,6 +332,11 @@ func TestJSONParquetParityWithoutPartitionOrNaN(t *testing.T) {
 
 func FuzzJSONParquetParity(f *testing.F) {
 	f.Add(rowWith("", ""), parityTopic)
+	// strings past the arena's, followed by other messages to parse
+	for _, n := range []int{4097, 20 << 10} {
+		long := rowWith("symbol", `"`+strings.Repeat("y", n)+`"`)
+		f.Add(bytes.Join([][]byte{long, rowWith("", ""), rowWith("interval", `"`+strings.Repeat("z", n)+`"`)}, []byte("\n")), parityTopic)
+	}
 	for _, v := range valueVariants {
 		f.Add(rowWith("price", v), parityTopic)
 		f.Add(rowWith("time", v), "metric.v1.okx-perps.1m")

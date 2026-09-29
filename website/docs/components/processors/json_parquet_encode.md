@@ -75,7 +75,9 @@ A required column the message lacks rejects it. A `null` in an optional column i
 
 A message that is not a single JSON object, or that any column rejects, is dropped: it is logged, counted in `json_parquet_encode_dropped` and acknowledged with the batch.
 
-When `partition` is set the batch is split into one Parquet file per distinct partition path, in order of first appearance, and the path is written to the configured metadata key. `{column}` in the path is replaced by the column's value as Bloblang's `format` would print the field, and `{column|layout}` by the column's number, read in `time_unit`, as a UTC time in the Go layout. Every output message carries the metadata of the first message of its partition.
+When `partition` is set the batch is split into one Parquet file per distinct partition path, in order of first appearance, and the path is written to the configured metadata key. `{column}` in the path is replaced by the column's value as Bloblang's `format` would print the field, and `{column|layout}` by the column's number, read in `time_unit`, as a UTC time in the Go layout. Every output message carries the metadata of the first message of its partition, and the files written are counted in `json_parquet_encode_files`.
+
+Every file costs something of its own: a footer, pages begun for each column, and, when a text column holds a single value and it is empty, or the file is large and holds an empty string, a writer of its own. Encoding a batch as hundreds of small files takes about a third more time and half as much memory again as encoding it as a couple of dozen, and leaves many small objects to store and query. Prefer a coarse partition path, and batches closed by size rather than time where the rate allows.
 
 ## Examples
 
@@ -106,7 +108,7 @@ output:
               - { name: close, type: DOUBLE }
               - { name: volume, type: DOUBLE, optional: true }
             columns:
-              - { name: exchange, value: '${! @kafka_topic.split(".").index(2) }' }
+              - { name: exchange, value: '${! @kafka_topic.split(".").index(2) }', cache_by: [ kafka_topic ] }
             partition:
               path: 'exchange={exchange}/{time|year=2006/month=01/day=02}'
               time_unit: us
@@ -210,6 +212,21 @@ This field supports [interpolation functions](/docs/configuration/interpolation#
 
 
 Type: `string`  
+
+### `columns[].cache_by`
+
+The metadata fields the value depends on. When set, the value is evaluated once per batch for each distinct combination of these fields' values, rather than for every message, and messages that share them share it: the value must depend on nothing else. A value found to read a message field, the whole of the metadata, or a metadata field not listed is rejected, but not everything can be found: what a function or method called with a non-literal argument reads, what a lambda reads, what a function that reads the message without naming a field reads (`content()`), and a function that differs from call to call (`now()`, `uuid_v4()`, `count()`). A message whose listed field holds anything but a string is evaluated on its own.
+
+
+Type: `array`  
+Default: `[]`  
+
+```yml
+# Examples
+
+cache_by:
+  - kafka_topic
+```
 
 ### `nan_for_null`
 

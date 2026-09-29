@@ -3,6 +3,7 @@ package field
 import (
 	"bytes"
 
+	"github.com/warpstreamlabs/bento/internal/bloblang/query"
 	"github.com/warpstreamlabs/bento/internal/message"
 )
 
@@ -63,6 +64,22 @@ func (e *Expression) resolve(index int, msg Message, escaped bool) ([]byte, erro
 		_, _ = buf.Write(b)
 	}
 	return buf.Bytes(), nil
+}
+
+// QueryTargets returns what the dynamic parts of the expression read.
+func (e *Expression) QueryTargets(ctx query.TargetsContext) []query.TargetPath {
+	var paths []query.TargetPath
+	for _, r := range e.resolvers {
+		var p []query.TargetPath
+		switch q := r.(type) {
+		case *QueryResolver:
+			_, p = q.QueryTargets(ctx)
+		case QueryResolver:
+			_, p = q.QueryTargets(ctx)
+		}
+		paths = append(paths, p...)
+	}
+	return paths
 }
 
 // NumDynamicExpressions returns the number of dynamic interpolation functions

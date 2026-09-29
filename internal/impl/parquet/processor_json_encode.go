@@ -3,6 +3,7 @@ package parquet
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"encoding/json/jsontext"
 	"errors"
@@ -10,10 +11,18 @@ import (
 	"io"
 	"math"
 	"reflect"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"unicode/utf8"
+	"unsafe"
 
 	"github.com/parquet-go/parquet-go"
 
+	"github.com/warpstreamlabs/bento/internal/bloblang/query"
+	"github.com/warpstreamlabs/bento/internal/component/interop"
 	"github.com/warpstreamlabs/bento/internal/value"
 	"github.com/warpstreamlabs/bento/public/service"
 )
@@ -22,6 +31,7 @@ const (
 	jpeFieldColumns          = "columns"
 	jpeFieldColumnName       = "name"
 	jpeFieldColumnValue      = "value"
+	jpeFieldColumnCacheBy    = "cache_by"
 	jpeFieldNaNForNull       = "nan_for_null"
 	jpeFieldPartition        = "partition"
 	jpeFieldPartitionPath    = "path"
@@ -47,11 +57,14 @@ A required column the message lacks rejects it. A `+"`null`"+` in an optional co
 
 A message that is not a single JSON object, or that any column rejects, is dropped: it is logged, counted in `+"`json_parquet_encode_dropped`"+` and acknowledged with the batch.
 
-When `+"`partition`"+` is set the batch is split into one Parquet file per distinct partition path, in order of first appearance, and the path is written to the configured metadata key. `+"`{column}`"+` in the path is replaced by the column's value as Bloblang's `+"`format`"+` would print the field, and `+"`{column|layout}`"+` by the column's number, read in `+"`time_unit`"+`, as a UTC time in the Go layout. Every output message carries the metadata of the first message of its partition.`).
+When `+"`partition`"+` is set the batch is split into one Parquet file per distinct partition path, in order of first appearance, and the path is written to the configured metadata key. `+"`{column}`"+` in the path is replaced by the column's value as Bloblang's `+"`format`"+` would print the field, and `+"`{column|layout}`"+` by the column's number, read in `+"`time_unit`"+`, as a UTC time in the Go layout. Every output message carries the metadata of the first message of its partition, and the files written are counted in `+"`json_parquet_encode_files`"+`.
+
+Every file costs something of its own: a footer, pages begun for each column, and, when a text column holds a single value and it is empty, or the file is large and holds an empty string, a writer of its own. Encoding a batch as hundreds of small files takes about a third more time and half as much memory again as encoding it as a couple of dozen, and leaves many small objects to store and query. Prefer a coarse partition path, and batches closed by size rather than time where the rate allows.`).
 		Field(parquetSchemaConfig()).
 		Field(service.NewObjectListField(jpeFieldColumns,
 			service.NewStringField(jpeFieldColumnName).Description("The schema column this sets."),
 			service.NewInterpolatedStringField(jpeFieldColumnValue).Description("The column's value, from the message's metadata. It must not reference the message content."),
+			service.NewStringListField(jpeFieldColumnCacheBy).Description("The metadata fields the value depends on. When set, the value is evaluated once per batch for each distinct combination of these fields' values, rather than for every message, and messages that share them share it: the value must depend on nothing else. A value found to read a message field, the whole of the metadata, or a metadata field not listed is rejected, but not everything can be found: what a function or method called with a non-literal argument reads, what a lambda reads, what a function that reads the message without naming a field reads (`content()`), and a function that differs from call to call (`now()`, `uuid_v4()`, `count()`). A message whose listed field holds anything but a string is evaluated on its own.").Example([]string{"kafka_topic"}).Default([]any{}),
 		).Description("Columns set from an interpolation instead of the message field of their name.").Default([]any{})).
 		Field(service.NewBoolField(jpeFieldNaNForNull).Description("Write a `null` in a required `FLOAT` or `DOUBLE` column as NaN instead of dropping the message.").Default(false)).
 		Field(service.NewObjectField(jpeFieldPartition,
@@ -86,7 +99,7 @@ output:
               - { name: close, type: DOUBLE }
               - { name: volume, type: DOUBLE, optional: true }
             columns:
-              - { name: exchange, value: '${! @kafka_topic.split(".").index(2) }' }
+              - { name: exchange, value: '${! @kafka_topic.split(".").index(2) }', cache_by: [ kafka_topic ] }
             partition:
               path: 'exchange={exchange}/{time|year=2006/month=01/day=02}'
               time_unit: us
@@ -121,6 +134,25 @@ type jpeColumn struct {
 	optional bool
 	leaf     int                         // index of the Parquet leaf column
 	interp   *service.InterpolatedString // set when the column comes from metadata
+	// cacheBy, when set, are the metadata fields interp depends on: it is
+	// evaluated once per batch per combination of their values
+	cacheBy []string
+}
+
+// definitionLevel is the definition level of a value in the column: 1 for an
+// optional one, 0 for a required one or a null.
+func (c *jpeColumn) definitionLevel() int {
+	if c.optional {
+		return 1
+	}
+	return 0
+}
+
+// jpeWriterPool holds writers between files: a sync.Pool, which lets the GC
+// empty it, and in tests a pool that keeps what it is given.
+type jpeWriterPool interface {
+	Get() any
+	Put(x any)
 }
 
 // jpePart is one piece of a partition path: literal text, or a column formatted
@@ -134,23 +166,36 @@ type jpePart struct {
 type jsonParquetEncoder struct {
 	log      *service.Logger
 	mDropped *service.MetricCounter
+	mFiles   *service.MetricCounter
 
-	schema  *parquet.Schema
-	codec   parquet.WriterOption
-	columns []jpeColumn
-	byName  map[string]int
-	nanNull bool
+	schema   *parquet.Schema
+	codec    parquet.WriterOption
+	columns  []jpeColumn
+	byName   map[string]int
+	byQuoted map[string]int // byName, by each name as JSON quotes it
+	nanNull  bool
 
 	partition     []jpePart
 	divisor       float64
 	partitionMeta string
+
+	utf8Leaves []int         // the Parquet leaves of the UTF8 columns
+	writers    jpeWriterPool // of *parquet.GenericWriter[any], reset for each file
+
+	// newWriters, for tests, gives every file a new writer, and reused counts
+	// the files that were given a reset one
+	newWriters bool
+	reused     atomic.Int64
 }
 
 func newJSONParquetEncoder(conf *service.ParsedConfig, mgr *service.Resources) (*jsonParquetEncoder, error) {
 	e := &jsonParquetEncoder{
 		log:      mgr.Logger(),
 		mDropped: mgr.Metrics().NewCounter("json_parquet_encode_dropped"),
+		mFiles:   mgr.Metrics().NewCounter("json_parquet_encode_files"),
 		byName:   map[string]int{},
+		writers:  &sync.Pool{},
+		byQuoted: map[string]int{},
 	}
 
 	fields, err := conf.FieldObjectList("schema")
@@ -186,7 +231,12 @@ func newJSONParquetEncoder(conf *service.ParsedConfig, mgr *service.Resources) (
 		if _, exists := e.byName[name]; exists {
 			return nil, fmt.Errorf("column '%v' is defined twice", name)
 		}
+		quoted, err := jsontext.AppendQuote(nil, name)
+		if err != nil {
+			return nil, fmt.Errorf("column '%v': %w", name, err)
+		}
 		e.byName[name] = len(e.columns)
+		e.byQuoted[string(quoted)] = len(e.columns)
 		e.columns = append(e.columns, jpeColumn{name: name, kind: kind, optional: optional})
 	}
 
@@ -208,6 +258,18 @@ func newJSONParquetEncoder(conf *service.ParsedConfig, mgr *service.Resources) (
 		}
 		if e.columns[i].interp, err = o.FieldInterpolatedString(jpeFieldColumnValue); err != nil {
 			return nil, err
+		}
+		if e.columns[i].cacheBy, err = o.FieldStringList(jpeFieldColumnCacheBy); err != nil {
+			return nil, err
+		}
+		if len(e.columns[i].cacheBy) > 0 {
+			raw, err := o.FieldString(jpeFieldColumnValue)
+			if err != nil {
+				return nil, err
+			}
+			if err := jpeCheckCacheBy(mgr, raw, e.columns[i].cacheBy); err != nil {
+				return nil, fmt.Errorf("columns: '%v': %w", name, err)
+			}
 		}
 	}
 	if e.nanNull, err = conf.FieldBool(jpeFieldNaNForNull); err != nil {
@@ -240,6 +302,9 @@ func newJSONParquetEncoder(conf *service.ParsedConfig, mgr *service.Resources) (
 			return nil, fmt.Errorf("schema column %v has no definition", path[0])
 		}
 		e.columns[i].leaf = leaf
+		if e.columns[i].kind == jpeUTF8 {
+			e.utf8Leaves = append(e.utf8Leaves, leaf)
+		}
 	}
 
 	compressStr, err := conf.FieldString("default_compression")
@@ -315,13 +380,53 @@ func (e *jsonParquetEncoder) parsePartitionPath(path string) ([]jpePart, error) 
 
 //------------------------------------------------------------------------------
 
-// jpeRow holds the fields of one message the schema reads, as the Go values
-// Bento's own JSON decoding gives them (string, json.Number, bool, nil, or a
-// map or slice for a nested value), so coercion runs the very functions
-// Bloblang's methods do.
+// jpeRow holds the fields of one message the schema reads, each as the kind
+// of its JSON value and its content, copied into buf: a string's decoded text,
+// a number's literal, or a nested value's raw JSON. Coercion parses the content
+// as the functions Bloblang's methods do would parse the Go value Bento's own
+// JSON decoding gives the field (string, json.Number, bool, nil, or a map or
+// slice), and hands them that value itself where it is not a string or number.
 type jpeRow struct {
-	present []bool
-	values  []any
+	kind    []byte // as jsontext.Kind: '"', '0', 't', 'f', 'n', '{' or '[', and 0 when absent
+	start   []int
+	end     []int
+	buf     []byte
+	unquote []byte
+}
+
+func newJPERow(columns int) *jpeRow {
+	return &jpeRow{
+		kind:  make([]byte, columns),
+		start: make([]int, columns),
+		end:   make([]int, columns),
+	}
+}
+
+// content is the content of field i, valid until the next message is parsed.
+func (r *jpeRow) content(i int) []byte {
+	return r.buf[r.start[i]:r.end[i]]
+}
+
+// goValue is field i as Bento's JSON decoding gives it.
+func (r *jpeRow) goValue(i int) (any, error) {
+	c := r.content(i)
+	switch r.kind[i] {
+	case '"':
+		return string(c), nil
+	case '0':
+		return json.Number(c), nil
+	case 't':
+		return true, nil
+	case 'f':
+		return false, nil
+	case 'n', 0: // an absent field reads as null, as nil
+		return nil, nil
+	}
+	nested := json.NewDecoder(bytes.NewReader(c))
+	nested.UseNumber()
+	var out any
+	err := nested.Decode(&out)
+	return out, err
 }
 
 // jpeDecodeOptions make jsontext read a document as encoding/json does, and so
@@ -332,13 +437,27 @@ var jpeDecodeOptions = []jsontext.Options{
 	jsontext.AllowInvalidUTF8(true),
 }
 
+// unquoteString returns the text of a JSON string as jsontext.Token.String would: the
+// literal's own bytes when it has no escape and is valid UTF-8, and its decoding,
+// with invalid UTF-8 mangled into U+FFFD, otherwise. The result is only valid
+// until the next call.
+func (r *jpeRow) unquoteString(lit []byte) []byte {
+	inner := lit[1 : len(lit)-1]
+	if bytes.IndexByte(inner, '\\') < 0 && utf8.Valid(inner) {
+		return inner
+	}
+	// The error only reports invalid UTF-8, which is mangled as it should be.
+	r.unquote, _ = jsontext.AppendUnquote(r.unquote[:0], lit)
+	return r.unquote
+}
+
 // parse reads one message into r. It fails where Bento's own decoding of the
 // message would: anything but exactly one JSON document. A document that is not
 // an object fails too, which only drops what the coercion would have dropped
 // anyway, since a schema read from the message has at least one column.
 func (e *jsonParquetEncoder) parse(dec *jsontext.Decoder, src *bytes.Reader, raw []byte, r *jpeRow) error {
-	clear(r.present)
-	clear(r.values)
+	clear(r.kind)
+	r.buf = r.buf[:0]
 	src.Reset(raw)
 	dec.Reset(src, jpeDecodeOptions...)
 
@@ -350,21 +469,28 @@ func (e *jsonParquetEncoder) parse(dec *jsontext.Decoder, src *bytes.Reader, raw
 		return fmt.Errorf("not a JSON object but %v", tok.Kind())
 	}
 	for dec.PeekKind() != '}' {
-		name, err := dec.ReadToken()
+		name, err := dec.ReadValue()
 		if err != nil {
 			return fmt.Errorf("not JSON: %w", err)
 		}
-		i, ok := e.byName[name.String()]
+		i, ok := e.column(r, name)
 		if !ok || e.columns[i].interp != nil {
 			if err := dec.SkipValue(); err != nil {
 				return fmt.Errorf("not JSON: %w", err)
 			}
 			continue
 		}
-		if r.values[i], err = jpeGoValue(dec); err != nil {
+		v, err := dec.ReadValue()
+		if err != nil {
 			return fmt.Errorf("not JSON: %w", err)
 		}
-		r.present[i] = true
+		r.kind[i] = byte(v.Kind())
+		if r.kind[i] == '"' {
+			v = r.unquoteString(v)
+		}
+		r.start[i] = len(r.buf)
+		r.buf = append(r.buf, v...)
+		r.end[i] = len(r.buf)
 	}
 	if _, err := dec.ReadToken(); err != nil { // the closing '}'
 		return fmt.Errorf("not JSON: %w", err)
@@ -378,122 +504,220 @@ func (e *jsonParquetEncoder) parse(dec *jsontext.Decoder, src *bytes.Reader, raw
 	return nil
 }
 
-// jpeGoValue reads the next JSON value as Bento's decoding gives it.
-func jpeGoValue(dec *jsontext.Decoder) (any, error) {
-	switch dec.PeekKind() {
-	case '{', '[':
-		v, err := dec.ReadValue()
-		if err != nil {
-			return nil, err
-		}
-		nested := json.NewDecoder(bytes.NewReader(v))
-		nested.UseNumber()
-		var out any
-		err = nested.Decode(&out)
-		return out, err
+// column returns the column a member name, as raw JSON, names. A name as JSON
+// quotes it, the name's own bytes when it needs no escape, is found as it is;
+// one that is not so quoted, with an escape or invalid UTF-8, is unquoted to
+// be found. A name quoted otherwise cannot name a column: were it to unquote
+// to one, it would be that name's own bytes, which is how JSON quotes it.
+func (e *jsonParquetEncoder) column(r *jpeRow, name []byte) (int, bool) {
+	if i, ok := e.byQuoted[string(name)]; ok {
+		return i, true
 	}
-	tok, err := dec.ReadToken()
-	if err != nil {
-		return nil, err
+	if inner := name[1 : len(name)-1]; bytes.IndexByte(inner, '\\') < 0 && utf8.Valid(inner) {
+		return 0, false
 	}
-	switch tok.Kind() {
-	case '"':
-		return tok.String(), nil
-	case '0':
-		return json.Number(tok.String()), nil
-	case 't':
-		return true, nil
-	case 'f':
-		return false, nil
-	}
-	return nil, nil
+	i, ok := e.byName[string(r.unquoteString(name))]
+	return i, ok
 }
 
-// value coerces column i of r, as the column's Bloblang coercion would, into
-// the Parquet value of its leaf.
-func (e *jsonParquetEncoder) value(c *jpeColumn, present bool, v any) (parquet.Value, error) {
-	def := 0
-	if c.optional {
-		def = 1
-	}
-	if !present || v == nil {
+// value coerces field i of r, as the column's Bloblang coercion would, into the
+// Parquet value of the column's leaf. A string or number is parsed by the very
+// strconv call the coercion would make of it (json.Number's Int64 and Float64
+// parse in base 10, a string's integer in any base Go literals use); anything
+// else is handed to the coercion itself.
+func (e *jsonParquetEncoder) value(a *jpeArena, c *jpeColumn, r *jpeRow, i int) (parquet.Value, error) {
+	def := c.definitionLevel()
+	kind := r.kind[i]
+	var v any // set for the coercion when the field is neither a string nor a number
+	if kind == 0 || kind == 'n' {
 		switch {
 		case c.optional:
 			return parquet.NullValue().Level(0, 0, c.leaf), nil
-		case !present:
+		case kind == 0:
 			return parquet.Value{}, errors.New("missing")
 		case e.nanNull && (c.kind == jpeFloat || c.kind == jpeDouble):
 			v = math.NaN()
 		default:
 			return parquet.Value{}, errors.New("value is null")
 		}
+	} else if kind != '"' && kind != '0' {
+		var err error
+		if v, err = r.goValue(i); err != nil {
+			return parquet.Value{}, err
+		}
 	}
 	var pv parquet.Value
 	switch c.kind {
 	case jpeUTF8:
-		pv = parquet.ByteArrayValue([]byte(jpeString(v)))
-	case jpeInt32:
-		i, err := value.IToInt32(v)
+		if v != nil {
+			s := value.IToString(v) // made for this value alone
+			pv = parquet.ByteArrayValue(unsafe.Slice(unsafe.StringData(s), len(s)))
+		} else {
+			pv = parquet.ByteArrayValue(a.copy(r.content(i)))
+		}
+	case jpeInt32, jpeInt64:
+		var n int64
+		var err error
+		switch {
+		case v != nil:
+			n, err = value.IToInt(v)
+		case kind == '0':
+			n, err = strconv.ParseInt(string(r.content(i)), 10, 64)
+		default:
+			n, err = strconv.ParseInt(string(r.content(i)), 0, 64)
+		}
 		if err != nil {
 			return parquet.Value{}, err
 		}
-		pv = parquet.Int32Value(i)
-	case jpeInt64:
-		i, err := value.IToInt(v)
+		if c.kind == jpeInt64 {
+			pv = parquet.Int64Value(n)
+			break
+		}
+		// value.IToInt32's bounds
+		if n > math.MaxInt32 {
+			return parquet.Value{}, errors.New("value is too large to be cast as a 32-bit signed integer")
+		}
+		if n < math.MinInt32 {
+			return parquet.Value{}, errors.New("value is too small to be cast as a 32-bit signed integer")
+		}
+		pv = parquet.Int32Value(int32(n))
+	case jpeFloat, jpeDouble:
+		var f float64
+		var err error
+		if v != nil {
+			f, err = value.IToNumber(v)
+		} else {
+			f, err = strconv.ParseFloat(string(r.content(i)), 64)
+		}
 		if err != nil {
 			return parquet.Value{}, err
 		}
-		pv = parquet.Int64Value(i)
-	case jpeFloat:
-		f, err := value.IToNumber(v)
-		if err != nil {
-			return parquet.Value{}, err
+		if c.kind == jpeFloat {
+			pv = parquet.FloatValue(float32(f))
+		} else {
+			pv = parquet.DoubleValue(f)
 		}
-		pv = parquet.FloatValue(float32(f))
-	case jpeDouble:
-		f, err := value.IToNumber(v)
-		if err != nil {
-			return parquet.Value{}, err
-		}
-		pv = parquet.DoubleValue(f)
 	}
 	return pv.Level(0, def, c.leaf), nil
 }
 
-// jpeString is Bloblang's .string(), whose objects are marshalled by gabs.
-func jpeString(v any) string {
-	return value.IToString(v)
-}
-
-// partitionPath formats the partition path of a row, as the Bloblang
-// "...".format(this.a, ...) and (this.t / divisor).ts_format(layout, "UTC")
-// it replaces would.
-func (e *jsonParquetEncoder) partitionPath(b *strings.Builder, r *jpeRow, interpolated []string) error {
-	b.Reset()
+// appendPartitionPath appends the partition path of a row to b, as the
+// Bloblang "...".format(this.a, ...) and
+// (this.t / divisor).ts_format(layout, "UTC") it replaces would.
+func (e *jsonParquetEncoder) appendPartitionPath(b []byte, r *jpeRow, interpolated []string) ([]byte, error) {
 	for _, p := range e.partition {
 		switch {
 		case p.column < 0:
-			b.WriteString(p.literal)
+			b = append(b, p.literal...)
 		case e.columns[p.column].interp != nil:
-			b.WriteString(interpolated[p.column])
+			b = append(b, interpolated[p.column]...)
+		case p.layout == "" && (r.kind[p.column] == '"' || r.kind[p.column] == '0'):
+			// "%s" prints a string or json.Number as its text
+			b = append(b, r.content(p.column)...)
 		case p.layout == "":
-			fmt.Fprintf(b, "%s", r.values[p.column])
-		default:
-			n, err := value.IGetNumber(r.values[p.column])
+			v, err := r.goValue(p.column)
 			if err != nil {
-				return fmt.Errorf("partition: %v: %w", e.columns[p.column].name, err)
+				return b, fmt.Errorf("partition: %v: %w", e.columns[p.column].name, err)
+			}
+			b = fmt.Appendf(b, "%s", v)
+		default:
+			var n float64
+			var err error
+			if r.kind[p.column] == '0' {
+				// json.Number's Float64
+				n, err = strconv.ParseFloat(string(r.content(p.column)), 64)
+			} else {
+				var v any
+				if v, err = r.goValue(p.column); err == nil {
+					n, err = value.IGetNumber(v)
+				}
+			}
+			if err != nil {
+				return b, fmt.Errorf("partition: %v: %w", e.columns[p.column].name, err)
 			}
 			t, err := value.IGetTimestamp(n / e.divisor)
 			if err != nil {
-				return fmt.Errorf("partition: %v: %w", e.columns[p.column].name, err)
+				return b, fmt.Errorf("partition: %v: %w", e.columns[p.column].name, err)
 			}
-			b.WriteString(t.UTC().Format(p.layout))
+			b = t.UTC().AppendFormat(b, p.layout)
 		}
 	}
-	return nil
+	return b, nil
 }
 
 //------------------------------------------------------------------------------
+
+// jpeArena holds a group's rows until they are encoded: their values, and the
+// bytes of their UTF8 values, in chunks that double from one row and 64 bytes
+// up to jpeArenaRows rows and jpeArenaBytes bytes, so that a partition of a
+// few rows holds little more than they take, rather than an allocation for
+// every row and every string. A group's chunks are dropped with it once its
+// file is written, so the rows of a batch shrink as its files are encoded.
+type jpeArena struct {
+	values []parquet.Value
+	bytes  []byte
+}
+
+const (
+	jpeArenaRows  = 256
+	jpeArenaBytes = 16 << 10
+)
+
+// row returns an n-value row.
+func (a *jpeArena) row(n int) parquet.Row {
+	if cap(a.values)-len(a.values) < n {
+		a.values = make([]parquet.Value, 0, min(max(2*cap(a.values)/n, 1), jpeArenaRows)*n)
+	}
+	start := len(a.values)
+	a.values = a.values[:start+n]
+	return a.values[start : start+n : start+n]
+}
+
+// copy returns a copy of b. A value larger than a quarter chunk is copied on
+// its own, so that it does not waste the rest of one.
+func (a *jpeArena) copy(b []byte) []byte {
+	if len(b) > jpeArenaBytes/4 {
+		// append, since []byte(b) of a []byte is b itself, not a copy
+		return append([]byte(nil), b...)
+	}
+	if cap(a.bytes)-len(a.bytes) < len(b) {
+		size := min(max(2*cap(a.bytes), 64), jpeArenaBytes)
+		for size < jpeArenaBytes && size < 4*len(b) {
+			size *= 2
+		}
+		a.bytes = make([]byte, 0, size)
+	}
+	start := len(a.bytes)
+	a.bytes = append(a.bytes, b...)
+	return a.bytes[start:len(a.bytes):len(a.bytes)]
+}
+
+// jpeArenaMark is where an arena's chunks stood before a row was taken.
+type jpeArenaMark struct {
+	values *parquet.Value
+	nv     int
+	bytes  *byte
+	nb     int
+}
+
+func (a *jpeArena) mark() jpeArenaMark {
+	return jpeArenaMark{unsafe.SliceData(a.values), len(a.values), unsafe.SliceData(a.bytes), len(a.bytes)}
+}
+
+// release gives back what was taken since m: a dropped row's values and
+// bytes. A chunk begun since m holds nothing else, and is emptied.
+func (a *jpeArena) release(m jpeArenaMark) {
+	nv, nb := m.nv, m.nb
+	if unsafe.SliceData(a.values) != m.values {
+		nv = 0
+	}
+	if unsafe.SliceData(a.bytes) != m.bytes {
+		nb = 0
+	}
+	clear(a.values[nv:])
+	a.values = a.values[:nv]
+	a.bytes = a.bytes[:nb]
+}
 
 // jpeGroup is one output file: the rows of one partition path, held until the
 // batch is read, and then encoded while no other group's file is.
@@ -501,6 +725,42 @@ type jpeGroup struct {
 	first *service.Message
 	key   string
 	rows  []parquet.Row
+	arena jpeArena
+	// what decides whether a reset writer would write the group's file as a
+	// new one would (see needsNewWriter): for each UTF8 column, by its index in
+	// utf8Leaves, how many of its values are not null and how many are empty;
+	// and the bytes of the group's UTF8 values
+	nonNull, empty []int
+	textBytes      int
+}
+
+// jpeValueBytes bounds what a value other than a string's bytes adds to a
+// column buffer's size: 8 bytes of value or 4 of length, and a level.
+const jpeValueBytes = 16
+
+// needsNewWriter reports whether a reset writer could write the group's file
+// otherwise than a new one. In parquet-go 0.29.0 a byte array column buffer's
+// Reset keeps the scratch buffer it swaps in to write a page of one value, so
+// the bounds of such a page, when its value is empty, point into memory a new
+// writer does not have: a new writer leaves them out, a reset one writes them
+// as empty. That is so of a column with one non-null value in the file, which
+// is empty. A column that spans pages (one is cut at
+// parquet.DefaultPageBufferSize bytes) can leave one value for its last page;
+// the tests find no difference then, having written a byte in an earlier
+// page, but a file with an empty string that could span pages takes a new
+// writer too, which costs little beside a file that large.
+func (e *jsonParquetEncoder) needsNewWriter(g *jpeGroup) bool {
+	anyEmpty := false
+	for k := range e.utf8Leaves {
+		if g.empty[k] == 0 {
+			continue
+		}
+		if g.nonNull[k] == 1 {
+			return true
+		}
+		anyEmpty = true
+	}
+	return anyEmpty && len(g.rows)*jpeValueBytes+g.textBytes >= parquet.DefaultPageBufferSize
 }
 
 func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.MessageBatch) ([]service.MessageBatch, error) {
@@ -508,15 +768,17 @@ func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.Mes
 		return nil, nil
 	}
 	var (
-		groups       []*jpeGroup
-		byKey        = map[string]*jpeGroup{}
-		current      *jpeGroup
-		src          bytes.Reader
-		dec          = jsontext.NewDecoder(&src, jpeDecodeOptions...)
-		row          = &jpeRow{present: make([]bool, len(e.columns)), values: make([]any, len(e.columns))}
-		interpolated = make([]string, len(e.columns))
-		key          strings.Builder
-		dropped      int
+		groups        []*jpeGroup
+		byKey         = map[string]*jpeGroup{}
+		current       *jpeGroup
+		src           bytes.Reader
+		dec           = jsontext.NewDecoder(&src, jpeDecodeOptions...)
+		row           = newJPERow(len(e.columns))
+		interpolated  = make([]string, len(e.columns))
+		interpolation = e.newInterpolation()
+		key           []byte
+		spare         *jpeGroup // the group of a new partition, until a row of it is kept
+		dropped       int
 	)
 	drop := func(err error) {
 		dropped++
@@ -531,43 +793,71 @@ func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.Mes
 			err = e.parse(dec, &src, raw, row)
 		}
 		if err == nil {
-			err = e.interpolate(msg, interpolated)
+			err = e.interpolate(interpolation, msg, interpolated)
 		}
 		if err != nil {
 			drop(err)
 			continue
 		}
-		values := make(parquet.Row, len(e.columns))
+		if e.partition != nil {
+			if key, err = e.appendPartitionPath(key[:0], row, interpolated); err != nil {
+				drop(err)
+				continue
+			}
+		}
+		// The key is only copied into a string for a new partition, once a row
+		// of it is kept: the comparison and lookup of string(key) do not
+		// allocate, and a rejected row leaves the spare group as it found it.
+		g, isNew := current, false
+		if g == nil || g.key != string(key) {
+			if g = byKey[string(key)]; g == nil {
+				if spare == nil {
+					spare = &jpeGroup{}
+				}
+				g, isNew = spare, true
+			}
+		}
+		mark := g.arena.mark()
+		values := g.arena.row(len(e.columns))
 		for i := range e.columns {
 			c := &e.columns[i]
 			if c.interp != nil {
-				values[c.leaf] = parquet.ByteArrayValue([]byte(interpolated[i])).Level(0, 0, c.leaf)
+				// The string's own bytes, which no one writes to: a cached one
+				// is shared by the batch's rows, and the writer copies values.
+				s := interpolated[i]
+				values[c.leaf] = parquet.ByteArrayValue(unsafe.Slice(unsafe.StringData(s), len(s))).Level(0, c.definitionLevel(), c.leaf)
 				continue
 			}
-			if values[c.leaf], err = e.value(c, row.present[i], row.values[i]); err != nil {
+			if values[c.leaf], err = e.value(&g.arena, c, row, i); err != nil {
 				err = fmt.Errorf("%v: %w", c.name, err)
 				break
 			}
 		}
 		if err != nil {
+			g.arena.release(mark)
 			drop(err)
 			continue
 		}
-		k := ""
-		if e.partition != nil {
-			if err := e.partitionPath(&key, row, interpolated); err != nil {
-				drop(err)
-				continue
-			}
-			k = key.String()
+		if isNew {
+			g.first, g.key = msg, string(key)
+			g.nonNull, g.empty = make([]int, len(e.utf8Leaves)), make([]int, len(e.utf8Leaves))
+			spare = nil
 		}
-		if current == nil || current.key != k {
-			if current = byKey[k]; current == nil {
-				current = &jpeGroup{first: msg, key: k}
-				byKey[k] = current
-				groups = append(groups, current)
+		for k, leaf := range e.utf8Leaves {
+			if v := values[leaf]; !v.IsNull() {
+				g.nonNull[k]++
+				if n := len(v.ByteArray()); n == 0 {
+					g.empty[k]++
+				} else {
+					g.textBytes += n
+				}
 			}
 		}
+		if isNew {
+			byKey[g.key] = g
+			groups = append(groups, g)
+		}
+		current = g
 		current.rows = append(current.rows, values)
 	}
 	if dropped > 0 {
@@ -580,39 +870,141 @@ func (e *jsonParquetEncoder) ProcessBatch(ctx context.Context, batch service.Mes
 	// Files are encoded one at a time, as parquet_encode encodes each group
 	// group_by_value hands it: a writer's column buffers are the bulk of what
 	// encoding holds, so a batch of many partitions must not hold one per file.
-	// Each file takes a new writer, since a reset one does not write the same
-	// bytes as a new one.
+	//
+	// A writer is reset for the next file, and pooled, rather than made anew:
+	// making one is a third of what a batch of many small files allocates. A
+	// reset writer writes the bytes a new one would, save for a page of one
+	// empty string (see needsNewWriter), so a file that could have one takes a
+	// new writer.
+	//
+	// The files are written into one buffer, grown once to the largest of them,
+	// and each is copied out at its size: a buffer of its own would grow by
+	// doubling from nothing, and hand its message what doubling left unused.
+	// The last file keeps the buffer when that leaves little unused.
+	var buf bytes.Buffer
 	out := make(service.MessageBatch, 0, len(groups))
-	for _, g := range groups {
-		var buf bytes.Buffer
-		if err := jpeEncode(parquet.NewGenericWriter[any](&buf, e.schema, e.codec), g.rows); err != nil {
+	for gi, g := range groups {
+		buf.Reset()
+		w, _ := e.writers.Get().(*parquet.GenericWriter[any])
+		if w == nil || e.newWriters || e.needsNewWriter(g) {
+			w = parquet.NewGenericWriter[any](&buf, e.schema, e.codec, jpeNoWriteBuffer)
+		} else {
+			w.Reset(&buf)
+			e.reused.Add(1)
+		}
+		if err := jpeEncode(w, g.rows); err != nil {
 			return nil, err
 		}
-		g.rows = nil
+		w.Reset(nil) // not to keep the file written reachable from the pool
+		e.writers.Put(w)
+		g.rows, g.arena = nil, jpeArena{}
 		m := g.first.Copy()
-		m.SetBytes(buf.Bytes())
+		if data := buf.Bytes(); gi == len(groups)-1 && cap(data)-len(data) <= len(data)/4 {
+			m.SetBytes(data)
+		} else {
+			m.SetBytes(bytes.Clone(data))
+		}
 		if e.partition != nil {
 			m.MetaSetMut(e.partitionMeta, g.key)
 		}
 		out = append(out, m)
 	}
+	e.mFiles.Incr(int64(len(out)))
 	return []service.MessageBatch{out}, nil
 }
 
+// jpeCheckCacheBy fails if the interpolation raw is found to read anything but
+// the metadata fields cacheBy: the message, a variable, the whole of the
+// metadata or another field. Bloblang does not report everything a query
+// reads (see the cache_by field), so this catches mistakes, not all of them.
+func jpeCheckCacheBy(res *service.Resources, raw string, cacheBy []string) error {
+	expr, err := interop.UnwrapManagement(res).BloblEnvironment().NewField(raw)
+	if err != nil {
+		return err
+	}
+	for _, t := range expr.QueryTargets(query.TargetsContext{}) {
+		switch {
+		case t.Type != query.TargetMetadata:
+			return errors.New("cache_by: the value reads more than metadata")
+		case len(t.Path) == 0:
+			return errors.New("cache_by: the value reads the whole of the metadata")
+		case !slices.Contains(cacheBy, t.Path[0]):
+			return fmt.Errorf("cache_by: the value reads the metadata field %q, which is not listed", t.Path[0])
+		}
+	}
+	return nil
+}
+
+// jpeInterpolation resolves the interpolated columns of a batch's messages,
+// the cached ones once per distinct combination of the metadata they read.
+type jpeInterpolation struct {
+	cache []map[string]string // by column, for the cached ones
+	key   []byte
+}
+
+func (e *jsonParquetEncoder) newInterpolation() *jpeInterpolation {
+	in := &jpeInterpolation{cache: make([]map[string]string, len(e.columns))}
+	for i, c := range e.columns {
+		if len(c.cacheBy) > 0 {
+			in.cache[i] = map[string]string{}
+		}
+	}
+	return in
+}
+
 // interpolate resolves the interpolated columns of a message.
-func (e *jsonParquetEncoder) interpolate(msg *service.Message, interpolated []string) error {
+func (e *jsonParquetEncoder) interpolate(in *jpeInterpolation, msg *service.Message, interpolated []string) error {
 	for i, c := range e.columns {
 		if c.interp == nil {
 			continue
+		}
+		cacheable := false
+		if len(c.cacheBy) > 0 {
+			in.key, cacheable = jpeCacheKey(in.key[:0], msg, c.cacheBy)
+			if cacheable {
+				if s, ok := in.cache[i][string(in.key)]; ok {
+					interpolated[i] = s
+					continue
+				}
+			}
 		}
 		s, err := c.interp.TryString(msg)
 		if err != nil {
 			return fmt.Errorf("%v: %w", c.name, err)
 		}
+		if cacheable {
+			in.cache[i][string(in.key)] = s
+		}
 		interpolated[i] = s
 	}
 	return nil
 }
+
+// jpeCacheKey appends to b the values of the metadata fields keys, each marked
+// absent or given with its length. It reports false, and the message is not
+// cached, when a field holds anything but a string, since a value of another
+// type could print the same as a string yet read differently.
+func jpeCacheKey(b []byte, msg *service.Message, keys []string) ([]byte, bool) {
+	for _, k := range keys {
+		v, ok := msg.MetaGetMut(k)
+		if !ok {
+			b = append(b, 0)
+			continue
+		}
+		s, isString := v.(string)
+		if !isString {
+			return b, false
+		}
+		b = append(b, 1)
+		b = binary.AppendUvarint(b, uint64(len(s)))
+		b = append(b, s...)
+	}
+	return b, true
+}
+
+// jpeNoWriteBuffer drops the writer's buffering of its output, which is a
+// bytes.Buffer already: 32 KiB a file saved, the same bytes written.
+var jpeNoWriteBuffer = parquet.WriteBufferSize(0)
 
 // jpeEncode writes rows as one whole file.
 func jpeEncode(w *parquet.GenericWriter[any], rows []parquet.Row) (err error) {
