@@ -76,6 +76,7 @@ input:
     sasl: [] # No default (optional)
     multi_header: false
     add_record_metadata: true
+    copy_record_values: false
     batching:
       count: 0
       byte_size: 0
@@ -778,6 +779,14 @@ Add the `kafka_*` metadata fields and record headers to each message. Disabling 
 
 Type: `bool`  
 Default: `true`  
+
+### `copy_record_values`
+
+Copy each record's value into its message instead of referencing the fetch response it arrived in. A record's key, value and header values are slices of that response, which holds every record fetched from the broker in the same request, so a message held for long (e.g. in a large output batch) otherwise keeps the whole response in memory. Costs one allocation per record.
+
+
+Type: `bool`  
+Default: `false`  
 
 ### `batching`
 

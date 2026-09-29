@@ -1,0 +1,116 @@
+name: Aperiodic Test
+
+# Tests and lints only the Go packages a pull request touches. The upstream Test
+# workflow runs the whole module and is disabled on this fork.
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: 'Space-separated package directories to test (e.g. "./internal/impl/parquet")'
+        required: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    if: github.repository == 'aperiodic-io/bento'
+    runs-on: ubicloud-standard-2
+    outputs:
+      packages: ${{ steps.packages.outputs.packages }}
+      modules: ${{ steps.packages.outputs.modules }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The pull request's merge commit and its first parent, the base.
+          fetch-depth: 2
+
+      - name: Find touched packages
+        id: packages
+        env:
+          INPUT_PACKAGES: ${{ inputs.packages }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            echo "packages=$INPUT_PACKAGES" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed="$(git diff --name-only HEAD^1 HEAD)"
+          echo "$changed"
+          # Each changed file belongs to the package of the nearest directory
+          # holding Go files; testdata belongs to the package that owns it.
+          packages="$(echo "$changed" | while read -r f; do
+            d="$(dirname "$f")"
+            d="${d%%/testdata*}"
+            while [ "$d" != . ] && ! compgen -G "$d/*.go" > /dev/null; do
+              d="$(dirname "$d")"
+            done
+            if [ "$d" != . ]; then echo "./$d"; fi
+          done | sort -u | tr '\n' ' ')"
+          echo "packages=$packages" >> "$GITHUB_OUTPUT"
+          if grep -qxE 'go\.(mod|sum)' <<< "$changed"; then
+            echo "modules=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Touched packages: ${packages:-none}"
+
+  test:
+    needs: changes
+    if: needs.changes.outputs.packages != '' || needs.changes.outputs.modules == 'true'
+    runs-on: ubicloud-standard-2
+    env:
+      PACKAGES: ${{ needs.changes.outputs.packages }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Deps
+        if: needs.changes.outputs.modules == 'true'
+        run: go mod tidy && git diff --exit-code go.mod go.sum || { >&2 echo "Stale go.{mod,sum} detected. This can be fixed with 'make deps'."; exit 1; }
+
+      # Downloads only the modules the touched packages build with, retrying the
+      # module proxy's intermittent stream errors.
+      - name: Download modules
+        if: env.PACKAGES != ''
+        run: |
+          for attempt in 1 2 3 4 5; do
+            go list -deps -test $PACKAGES > /dev/null && exit 0
+            sleep $((attempt * 10))
+          done
+          exit 1
+
+      - name: Vet
+        if: env.PACKAGES != ''
+        run: go vet $PACKAGES
+
+      - name: Test
+        if: env.PACKAGES != ''
+        run: go test -timeout 10m $PACKAGES
+
+  golangci-lint:
+    needs: changes
+    if: needs.changes.outputs.packages != ''
+    runs-on: ubicloud-standard-2
+    env:
+      CGO_ENABLED: 0
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+          args: ${{ needs.changes.outputs.packages }}

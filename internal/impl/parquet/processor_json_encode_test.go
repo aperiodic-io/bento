@@ -1,0 +1,179 @@
+package parquet
+
+import (
+	"bytes"
+	"context"
+	"math"
+	"testing"
+
+	"github.com/parquet-go/parquet-go"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/warpstreamlabs/bento/public/service"
+)
+
+func newTestJSONEncoder(t *testing.T, conf string) (*jsonParquetEncoder, error) {
+	t.Helper()
+	parsed, err := jsonParquetEncodeSpec().ParseYAML(conf, nil)
+	require.NoError(t, err)
+	return newJSONParquetEncoder(parsed, service.MockResources())
+}
+
+func TestJSONParquetEncodeRejectsWhatItCannotWrite(t *testing.T) {
+	// A config json_parquet_encode would write differently from parquet_encode,
+	// or not at all, must fail at start rather than on the first batch.
+	for name, conf := range map[string]string{
+		"no columns":           `schema: []`,
+		"nested column":        `schema: [ { name: a, type: STRUCT, fields: [ { name: b, type: UTF8 } ] } ]`,
+		"list column":          `schema: [ { name: a, type: LIST, fields: [ { name: element, type: UTF8 } ] } ]`,
+		"unsupported type":     `schema: [ { name: a, type: BOOLEAN } ]`,
+		"byte array":           `schema: [ { name: a, type: BYTE_ARRAY } ]`,
+		"repeated":             `schema: [ { name: a, type: INT64, repeated: true } ]`,
+		"duplicate column":     `schema: [ { name: a, type: INT64 }, { name: a, type: UTF8 } ]`,
+		"unknown override":     "schema: [ { name: a, type: UTF8 } ]\ncolumns: [ { name: b, value: x } ]",
+		"override not UTF8":    "schema: [ { name: a, type: INT64 } ]\ncolumns: [ { name: a, value: '1' } ]",
+		"unknown placeholder":  "schema: [ { name: a, type: UTF8 } ]\npartition: { path: 'x={b}' }",
+		"unclosed placeholder": "schema: [ { name: a, type: UTF8 } ]\npartition: { path: 'x={a' }",
+		"empty time layout":    "schema: [ { name: a, type: INT64 } ]\npartition: { path: 'x={a|}' }",
+		"time of interpolated": "schema: [ { name: a, type: UTF8 } ]\ncolumns: [ { name: a, value: x } ]\npartition: { path: '{a|2006}' }",
+		"unknown time unit":    "schema: [ { name: a, type: INT64 } ]\npartition: { path: '{a|2006}', time_unit: days }",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := newTestJSONEncoder(t, conf)
+			assert.Error(t, err)
+		})
+	}
+}
+
+func readRows(t *testing.T, data []byte) []parquet.Row {
+	t.Helper()
+	f, err := parquet.OpenFile(bytes.NewReader(data), int64(len(data)))
+	require.NoError(t, err)
+	var rows []parquet.Row
+	for _, rg := range f.RowGroups() {
+		r := rg.Rows()
+		buf := make([]parquet.Row, 16)
+		for {
+			n, err := r.ReadRows(buf)
+			for _, row := range buf[:n] {
+				rows = append(rows, row.Clone())
+			}
+			if err != nil {
+				break
+			}
+		}
+		require.NoError(t, r.Close())
+	}
+	return rows
+}
+
+func TestJSONParquetEncodeDropsInvalidRows(t *testing.T) {
+	// Dropped rows are acknowledged with the batch and never archived; the rest
+	// of the batch is written.
+	parsed, err := jsonParquetEncodeSpec().ParseYAML(`
+schema:
+  - { name: id, type: INT64 }
+  - { name: v, type: DOUBLE, optional: true }
+`, nil)
+	require.NoError(t, err)
+	res := service.MockResources()
+	e, err := newJSONParquetEncoder(parsed, res)
+	require.NoError(t, err)
+
+	out, err := e.ProcessBatch(context.Background(), service.MessageBatch{
+		service.NewMessage([]byte(`{"id":1,"v":null}`)),
+		service.NewMessage([]byte(`{"v":2}`)),    // missing id
+		service.NewMessage([]byte(`{"id":1.5}`)), // not an integer
+		service.NewMessage([]byte(`not json`)),   // not JSON
+		service.NewMessage([]byte(`{"id":2,"v":3}`)),
+	})
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	require.Len(t, out[0], 1, "without a partition the batch is one file")
+	data, err := out[0][0].AsBytes()
+	require.NoError(t, err)
+	rows := readRows(t, data)
+	require.Len(t, rows, 2)
+	assert.Equal(t, int64(1), rows[0][0].Int64())
+	assert.True(t, rows[0][1].IsNull())
+	assert.Equal(t, int64(2), rows[1][0].Int64())
+	assert.Equal(t, 3.0, rows[1][1].Double())
+}
+
+func TestJSONParquetEncodeAllDroppedWritesNothing(t *testing.T) {
+	e, err := newTestJSONEncoder(t, `schema: [ { name: id, type: INT64 } ]`)
+	require.NoError(t, err)
+	out, err := e.ProcessBatch(context.Background(), service.MessageBatch{service.NewMessage([]byte(`{}`))})
+	require.NoError(t, err)
+	assert.Nil(t, out, "an empty Parquet file would be uploaded as an object with no rows")
+	out, err = e.ProcessBatch(context.Background(), service.MessageBatch{})
+	require.NoError(t, err)
+	assert.Nil(t, out)
+}
+
+func TestJSONParquetEncodePartitionsKeepFirstMessageMetadata(t *testing.T) {
+	e, err := newTestJSONEncoder(t, `
+schema:
+  - { name: ex, type: UTF8 }
+  - { name: t, type: INT64 }
+columns:
+  - { name: ex, value: '${! @topic }' }
+partition:
+  path: 'ex={ex}/{t|2006-01-02}'
+  time_unit: s
+  metadata_key: part
+`)
+	require.NoError(t, err)
+	msg := func(topic, body string, offset int) *service.Message {
+		m := service.NewMessage([]byte(body))
+		m.MetaSetMut("topic", topic)
+		m.MetaSetMut("offset", offset)
+		return m
+	}
+	out, err := e.ProcessBatch(context.Background(), service.MessageBatch{
+		msg("a", `{"t":86399}`, 1), // 1970-01-01
+		msg("b", `{"t":86400}`, 2), // another exchange
+		msg("a", `{"t":86400}`, 3), // the next day
+		msg("a", `{"t":0}`, 4),     // back to the first partition
+	})
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	var parts []string
+	for _, m := range out[0] {
+		p, _ := m.MetaGet("part")
+		off, _ := m.MetaGetMut("offset")
+		parts = append(parts, p)
+		data, err := m.AsBytes()
+		require.NoError(t, err)
+		switch p {
+		case "ex=a/1970-01-01":
+			assert.Equal(t, 1, off, "a file carries its first message's metadata")
+			assert.Len(t, readRows(t, data), 2)
+		default:
+			assert.Len(t, readRows(t, data), 1)
+		}
+	}
+	assert.Equal(t, []string{"ex=a/1970-01-01", "ex=b/1970-01-02", "ex=a/1970-01-02"}, parts, "files in order of first appearance")
+}
+
+func TestJSONParquetEncodeOptionalStringIsNull(t *testing.T) {
+	// No Bloblang the archivers generate has an optional UTF8 column; here an
+	// optional column of any type reads null (or its absence) as NULL.
+	e, err := newTestJSONEncoder(t, `schema: [ { name: s, type: UTF8, optional: true }, { name: n, type: FLOAT } ]`)
+	require.NoError(t, err)
+	out, err := e.ProcessBatch(context.Background(), service.MessageBatch{
+		service.NewMessage([]byte(`{"s":null,"n":1}`)),
+		service.NewMessage([]byte(`{"n":2}`)),
+		service.NewMessage([]byte(`{"s":"x","n":null}`)), // null in a required float, nan_for_null off
+	})
+	require.NoError(t, err)
+	data, err := out[0][0].AsBytes()
+	require.NoError(t, err)
+	rows := readRows(t, data)
+	require.Len(t, rows, 2)
+	assert.True(t, rows[0][0].IsNull())
+	assert.True(t, rows[1][0].IsNull())
+	assert.Equal(t, float32(2), rows[1][1].Float())
+	assert.False(t, math.IsNaN(float64(rows[1][1].Float())))
+}

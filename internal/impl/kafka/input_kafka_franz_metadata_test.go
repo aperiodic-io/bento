@@ -39,3 +39,43 @@ func TestFranzRecordToMessageMetadata(t *testing.T) {
 	require.NoError(t, bare.msg.MetaWalkMut(func(string, any) error { count++; return nil }))
 	assert.Zero(t, count)
 }
+
+func TestFranzRecordToMessageCopyRecordValues(t *testing.T) {
+	// franz-go hands out records whose Key, Value and header values are slices of
+	// the fetch response they arrived in, which holds every record fetched from
+	// that broker in the same request. A message held in a long batch (and the
+	// record kept for checkpointing) would keep that whole response alive: with
+	// copy_record_values neither may reference it.
+	for _, addMetadata := range []bool{true, false} {
+		fetched := []byte("payload|k|abc")
+		record := &kgo.Record{
+			Value: fetched[0:7], Key: fetched[8:9], Topic: "metric.v1.x.15s", Partition: 1, Offset: 42,
+			Headers: []kgo.RecordHeader{{Key: "h", Value: fetched[10:13]}},
+		}
+		m := (&franzKafkaReader{addMetadata: addMetadata, copyValues: true}).recordToMessage(record)
+		for i := range fetched {
+			fetched[i] = 'X' // the fetch buffer is reused or freed once nothing points at it
+		}
+		b, err := m.msg.AsBytes()
+		require.NoError(t, err)
+		assert.Equal(t, "payload", string(b), "addMetadata=%v: the message must own its bytes", addMetadata)
+		assert.Nil(t, m.r.Key, "addMetadata=%v", addMetadata)
+		assert.Nil(t, m.r.Value, "addMetadata=%v", addMetadata)
+		assert.Nil(t, m.r.Headers, "addMetadata=%v: header values alias the fetch buffer", addMetadata)
+		assert.Equal(t, int64(42), m.r.Offset, "addMetadata=%v: checkpointing needs the offset", addMetadata)
+		if addMetadata {
+			got, _ := m.msg.MetaGetMut("h")
+			assert.Equal(t, "abc", got)
+			got, _ = m.msg.MetaGetMut("kafka_key")
+			assert.Equal(t, "k", got)
+		}
+	}
+
+	// The default is unchanged: the message shares the record's bytes.
+	fetched := []byte("payload")
+	m := (&franzKafkaReader{addMetadata: true}).recordToMessage(&kgo.Record{Value: fetched})
+	fetched[0] = 'X'
+	b, err := m.msg.AsBytes()
+	require.NoError(t, err)
+	assert.Equal(t, "Xayload", string(b))
+}
